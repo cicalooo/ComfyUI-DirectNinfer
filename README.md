@@ -19,13 +19,13 @@ This is the same layout used by the working setup:
 1. Copy or clone this repository to:
 
    ```text
-   C:\kijai\custom_nodes\ComfyUI-amp-ninfer
+   C:\~\custom_nodes\ComfyUI-amp-ninfer
    ```
 
 2. Install the node dependencies with the Python environment used by ComfyUI:
 
    ```powershell
-   C:\kijai\venv\Scripts\python.exe -m pip install -r C:\kijai\custom_nodes\ComfyUI-amp-ninfer\requirements.txt
+   C:\~\venv\Scripts\python.exe -m pip install -r C:\~\custom_nodes\ComfyUI-amp-ninfer\requirements.txt
    ```
 
    For another ComfyUI installation, replace those paths with its Python
@@ -112,5 +112,5 @@ and cache allocations.
 The test suite uses local fakes and does not require an NInfer binary or GPU:
 
 ```powershell
-C:\kijai\venv\Scripts\python.exe -m pytest -q
+C:\~\venv\Scripts\python.exe -m pytest -q
 ```
