@@ -1,0 +1,7 @@
+# Runtime dependencies not supplied by every ComfyUI installation.
+Pillow>=9.5
+numpy>=1.24
+psutil>=5.9
+
+# ComfyUI supplies torch.  Do not install a second torch build from this file;
+# use the torch/CUDA build required by your ComfyUI.

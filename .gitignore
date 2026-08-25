@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+.pytest_cache/
+.pytest-*/
+.pytest-tmp/
+
+artifacts/.cache/
+artifacts/*.ninfer
+
+.venv/
+venv/
+*.log
+.DS_Store
+Thumbs.db
