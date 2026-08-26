@@ -121,45 +121,11 @@ class ChatResponse:
     raw: Mapping[str, Any]
 
 
-def _clean_optional_text(value: str | None) -> str:
-    if value is None:
-        return ""
-    return value.strip()
-
-
-def _build_user_text(
-    user_prompt: str,
-    negative_prompt: str,
-    style_prompt: str,
-    asset_description: str,
-) -> str:
-    sections: list[str] = []
-    prompt = user_prompt.strip()
-    if prompt:
-        sections.append(prompt)
-    style = style_prompt.strip()
-    if style:
-        sections.append(f"Style / enhancement guidance:\n{style}")
-    negative = negative_prompt.strip()
-    if negative:
-        sections.append(
-            "Negative prompt / exclusions (do not include these in the result):\n"
-            f"{negative}"
-        )
-    asset = asset_description.strip()
-    if asset:
-        sections.append(f"Asset description:\n{asset}")
-    return "\n\n".join(sections)
-
-
 def build_chat_request(
     *,
     model_id: str,
     system_prompt: str,
     user_prompt: str,
-    negative_prompt: str = "",
-    style_prompt: str = "",
-    asset_description: str = "",
     image_urls: Sequence[str] = (),
     reasoning_mode: str = "disabled",
     max_tokens: int = 192,
@@ -178,9 +144,7 @@ def build_chat_request(
         raise ValueError("reasoning_mode must be disabled, low, or medium")
     if any(not isinstance(url, str) or not url.startswith("data:") for url in image_urls):
         raise ValueError("image_urls must contain only data URLs")
-    user_text = _build_user_text(
-        user_prompt, negative_prompt, style_prompt, asset_description
-    )
+    user_text = user_prompt.strip()
     if not user_text and not image_urls:
         raise ValueError("user_prompt or an image is required")
 

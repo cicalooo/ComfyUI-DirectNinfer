@@ -68,9 +68,6 @@ def test_build_multimodal_request_and_reasoning_mapping():
         model_id="qwen3.8-27b",
         system_prompt="Improve it.",
         user_prompt="A red fox",
-        style_prompt="cinematic",
-        negative_prompt="blurry",
-        asset_description="Reference photo",
         image_urls=["data:image/png;base64,AA==", "data:image/png;base64,BB=="],
         reasoning_mode="low",
         max_tokens=128,
@@ -84,7 +81,7 @@ def test_build_multimodal_request_and_reasoning_mapping():
     assert payload["seed"] == 7
     assert payload["repetition_penalty"] == pytest.approx(1.1)
     assert payload["messages"][1]["content"][0]["image_url"]["url"].startswith("data:")
-    assert "Negative prompt" in payload["messages"][1]["content"][-1]["text"]
+    assert payload["messages"][1]["content"][-1]["text"] == "A red fox"
 
 
 def test_disabled_reasoning_is_sent_as_none_and_content_excludes_reasoning():

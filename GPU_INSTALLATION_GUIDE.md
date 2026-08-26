@@ -27,8 +27,9 @@ card.
 
 The `qwen3_8_27b.ninfer` artifact is about 16.96 GiB before the runtime,
 context/KV cache, CUDA Graph buffers, and optional vision/speculation memory are
-allocated. A 24 GB card should start with a small context. Cards with 16 GB
-should not be assumed to fit this artifact.
+allocated. On a 24 GB card the node defaults to 16384 context and KV; reduce
+both in steps of 1024 if startup runs out of memory. Cards with 16 GB should
+not be assumed to fit this artifact.
 
 ## Install the common node files
 
@@ -203,9 +204,9 @@ folders:
 | Node field | Windows example | Linux example |
 |---|---|---|
 | `ninfer_executable` | `C:\ninfer\runtime\ninfer-serve.exe` | `/opt/ninfer/build/apps/ninfer-serve` |
-| `model_artifact` | `C:\models\qwen3_8_27b.ninfer` | `/opt/ninfer/models/qwen3_8_27b.ninfer` |
-| `model_id` | `qwen3.8-27b` | `qwen3.8-27b` |
-| `device` | `0` | `0` |
+| `models_dir` | `C:\models` | `/opt/ninfer/models` |
+| `model_artifact` | `qwen3_8_27b.ninfer` (dropdown) | `qwen3_8_27b.ninfer` (dropdown) |
+| `device` | `0` (Amp NInfer Advanced) | `0` (Amp NInfer Advanced) |
 
 Use `nvidia-smi -L` to identify the GPU index. This node launches one NInfer
 process on one CUDA device; it does not combine VRAM across multiple GPUs.
@@ -230,8 +231,8 @@ close other CUDA applications. Re-enable features one at a time.
 server use the same `host`/`port`, that the port is free, and that the
 executable can run with `--help` from the same user account as ComfyUI.
 
-**The model is rejected** — verify the SHA-256, use the exact
-`qwen3_8_27b.ninfer` artifact, and set `model_id` to `qwen3.8-27b`.
+**The model is rejected** — verify the SHA-256 and select the exact
+`.ninfer` artifact. Amp NInfer uses the id advertised on `/v1/models`.
 
 ## References
 

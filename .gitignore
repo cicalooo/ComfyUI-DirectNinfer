@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 
+.tmp/
 .pytest_cache/
 .pytest-*/
 .pytest-tmp/
@@ -10,6 +11,7 @@ artifacts/*.ninfer
 
 .venv/
 venv/
+.vscode/
 *.log
 .DS_Store
 Thumbs.db

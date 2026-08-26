@@ -123,6 +123,7 @@ class ServerHandle:
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=80))
     descendant_pids: set[int] = field(default_factory=set)
     stderr_thread: threading.Thread | None = None
+    advertised_model_id: str | None = None
 
     @property
     def pid(self) -> int:
@@ -532,14 +533,18 @@ def wait_until_ready(
                             for entry in entries
                             if isinstance(entry, dict) and entry.get("id")
                         } if isinstance(entries, list) else set()
-                        if handle.config.model_id not in model_ids:
+                        if not model_ids:
                             raise NInferStartupError(
-                                "NInfer is healthy but /v1/models does not advertise "
-                                f"the configured model_id {handle.config.model_id!r}; "
-                                f"advertised={sorted(model_ids)!r}"
+                                "NInfer is healthy but /v1/models advertised no model ids"
                             )
+                        preferred = handle.config.model_id.strip()
+                        handle.advertised_model_id = (
+                            preferred if preferred in model_ids else sorted(model_ids)[0]
+                        )
                     except NInferStartupError:
                         raise
+                else:
+                    handle.advertised_model_id = handle.config.model_id
                 return
             last_error = NInferHTTPError(result.status, "health check failed")
         except (NInferClientError, OSError) as exc:

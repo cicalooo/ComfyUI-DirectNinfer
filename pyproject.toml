@@ -1,0 +1,25 @@
+[project]
+name = "comfyui-amp-ninfer"
+description = "ComfyUI custom nodes for local NInfer prompt generation with optional vision inputs."
+version = "0.1.0"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "Pillow>=9.5",
+    "numpy>=1.24",
+    "psutil>=5.9",
+]
+
+[project.urls]
+Repository = "https://github.com/cicalooo/ComfyUI-amp-ninfer"
+
+[tool.comfy]
+PublisherId = "cicalooo"
+DisplayName = "Amp NInfer"
+Icon = ""
+web = "web"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
