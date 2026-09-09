@@ -6,7 +6,14 @@ from pathlib import Path
 
 from .process_manager import NInferConfigurationError
 
-DEFAULT_MODELS_DIR = r"C:\models"
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+_BUNDLED_MODELS_DIR = PACKAGE_ROOT / "artifacts"
+# Prefer the node's artifact directory so a freshly installed Linux node can
+# discover local models immediately. Keep a conventional per-user fallback
+# for installations that intentionally omit the repository artifact folder.
+DEFAULT_MODELS_DIR = str(
+    _BUNDLED_MODELS_DIR if _BUNDLED_MODELS_DIR.is_dir() else Path.home() / "models"
+)
 EMPTY_MODEL_PLACEHOLDER = "(no .ninfer files found)"
 _MODEL_ID_ALIASES = {
     "qwen3_8_27b": "qwen3.8-27b",
@@ -39,7 +46,13 @@ def derive_model_id(artifact: str | Path) -> str:
 
 
 def resolve_model_artifact(models_dir: str, model_artifact: str) -> str:
-    """Join ``models_dir`` with a relative selection, or keep an absolute path."""
+    """Join ``models_dir`` with a selection, including legacy workflow paths.
+
+    ComfyUI serializes widget values into workflows. A workflow created with
+    the old Windows default can therefore still contain ``C:\\models`` after
+    it is opened on Linux. If that directory is unavailable, use the node's
+    default artifact directory when it contains the selected file.
+    """
 
     selected = (model_artifact or "").strip()
     if not selected or selected.startswith("(no .ninfer"):
@@ -50,4 +63,10 @@ def resolve_model_artifact(models_dir: str, model_artifact: str) -> str:
     if path.is_absolute():
         return str(path)
     root = Path(models_dir).expanduser()
-    return str(root / selected)
+    candidate = root / selected
+    if candidate.is_file():
+        return str(candidate)
+    fallback = Path(DEFAULT_MODELS_DIR) / selected
+    if fallback.is_file():
+        return str(fallback)
+    return str(candidate)

@@ -6,6 +6,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 import hashlib
 import logging
+import os
 from pathlib import Path
 import threading
 from typing import Any
@@ -19,7 +20,7 @@ try:  # Package import when ComfyUI loads this directory as a custom node.
         resolve_model_artifact,
         scan_ninfer_models,
     )
-    from ..ninfer.multimodal import image_batch_to_data_urls
+    from ..ninfer.multimodal import DEFAULT_VISION_MAX_SIDE, images_to_data_urls
     from ..ninfer.process_manager import (
         LifecycleTimeouts,
         NInferConfigurationError,
@@ -40,7 +41,7 @@ except ImportError:  # Direct test/import from the repository root.
         resolve_model_artifact,
         scan_ninfer_models,
     )
-    from ninfer.multimodal import image_batch_to_data_urls
+    from ninfer.multimodal import DEFAULT_VISION_MAX_SIDE, images_to_data_urls
     from ninfer.process_manager import (
         LifecycleTimeouts,
         NInferConfigurationError,
@@ -79,6 +80,21 @@ _CACHE_IGNORED_INPUTS = frozenset(
 )
 _FIXED_SEED_RESPONSE_CACHE: OrderedDict[str, str] = OrderedDict()
 _FIXED_SEED_RESPONSE_CACHE_LIMIT = 32
+
+
+def _default_ninfer_executable() -> str:
+    """Return a usable default for the host platform and local install."""
+
+    configured = os.environ.get("NINFER_EXECUTABLE", "").strip()
+    if configured:
+        return configured
+    if os.name == "nt":
+        return (
+            r"C:\ninfer\ninfer-rtx3090-windows-x64-0.6.0-rtx3090"
+            r"\ninfer-serve.exe"
+        )
+    installed = Path("/opt/ninfer-3090/current/ninfer-serve")
+    return str(installed) if installed.is_file() else "ninfer-serve"
 
 
 def _hash_value(digest: "hashlib._Hash", value: Any) -> None:
@@ -160,26 +176,55 @@ def _generation_cache_key(inputs: Mapping[str, Any]) -> str | None:
     return deterministic_input_hash(cache_inputs)
 
 
+def _is_image_key(key: str) -> bool:
+    if key in {"image", "image_list", "Image List"}:
+        return True
+    return key.startswith("image_") and key[6:].isdigit()
+
+
+def _unwrap_input(value: Any) -> Any:
+    """ComfyUI INPUT_IS_LIST delivers every widget as a list (padded to the longest)."""
+
+    while isinstance(value, list):
+        if not value:
+            return None
+        value = value[0]
+    return value
+
+
+def _flatten_image_value(value: Any) -> list[Any]:
+    """Turn a tensor, batch, or ComfyUI IMAGE list into per-connection values."""
+
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        images: list[Any] = []
+        for item in value:
+            images.extend(_flatten_image_value(item))
+        return images
+    return [value]
+
+
 def _collect_images(kwargs: Mapping[str, Any]) -> list[Any]:
     images: list[Any] = []
-    legacy = kwargs.get("image")
-    if legacy is not None:
-        images.append(legacy)
+    for key in ("image", "image_list", "Image List"):
+        images.extend(_flatten_image_value(kwargs.get(key)))
     for index in range(1, MAX_IMAGE_INPUTS + 1):
-        value = kwargs.get(f"image_{index}")
-        if value is not None:
-            images.append(value)
+        images.extend(_flatten_image_value(kwargs.get(f"image_{index}")))
     return images
 
 
 class NInferQwenNode:
     """Enhance a prompt with a local NInfer model and return a STRING."""
 
-    CATEGORY = "Amp NInfer"
+    CATEGORY = "DirectNinfer"
     FUNCTION = "enhance_prompt"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("enhanced_prompt",)
     OUTPUT_NODE = False
+    # Receive a full ComfyUI IMAGE list in one call instead of re-running NInfer
+    # once per list item. Scalar widgets still work when tests pass them unwrapped.
+    INPUT_IS_LIST = True
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
@@ -191,6 +236,52 @@ class NInferQwenNode:
                 {
                     "default": True,
                     "tooltip": "Disable CUDA Graph capture on 24 GB cards.",
+                },
+            ),
+            "image_list": (
+                "IMAGE",
+                {
+                    "tooltip": (
+                        "Optional ComfyUI Image list (OUTPUT_IS_LIST). All items "
+                        "are sent in one request. Expanding image_1..image_20 still work."
+                    ),
+                },
+            ),
+            "vision_max_side": (
+                "INT",
+                {
+                    "default": DEFAULT_VISION_MAX_SIDE,
+                    "min": 0,
+                    "max": 4096,
+                    "step": 28,
+                    "tooltip": (
+                        "Maximum encoded image side for vision requests. "
+                        "Values are Qwen-aligned (multiples of 28). Default "
+                        "336 is the safe 24 GB profile. 0 keeps source size "
+                        "within the shared pixel budget."
+                    ),
+                },
+            ),
+            "vision_format": (
+                ["png", "jpeg", "auto"],
+                {
+                    "default": "png",
+                    "tooltip": (
+                        "Wire format after on-the-fly conversion. Any ComfyUI "
+                        "IMAGE (RGB/RGBA/L/CHW/BHWC) is normalized to RGB; "
+                        "JPEG/auto are rewritten to PNG because ninfer-serve "
+                        "JPEG/swscaler can crash on some Windows runtimes."
+                    ),
+                },
+            ),
+            "vision_jpeg_quality": (
+                "INT",
+                {
+                    "default": 85,
+                    "min": 1,
+                    "max": 95,
+                    "step": 1,
+                    "tooltip": "Kept for compatibility; PNG wire format ignores JPEG quality.",
                 },
             ),
             "image_1": (
@@ -271,10 +362,7 @@ class NInferQwenNode:
                 "ninfer_executable": (
                     "STRING",
                     {
-                        "default": (
-                            r"C:\ninfer\ninfer-rtx3090-windows-x64-0.6.0-rtx3090"
-                            r"\ninfer-serve.exe"
-                        ),
+                        "default": _default_ninfer_executable(),
                         "multiline": False,
                         "tooltip": "Full path to ninfer-serve.",
                     },
@@ -329,14 +417,20 @@ class NInferQwenNode:
     def IS_CHANGED(cls, **kwargs: Any) -> str:
         """Cache deterministic generations while allowing fresh random runs."""
 
-        force_execute = bool(kwargs.get("force_execute", True))
-        cache_inputs = {
-            key: value for key, value in kwargs.items() if key not in _CACHE_IGNORED_INPUTS
+        unwrapped = {
+            key: value if _is_image_key(key) else _unwrap_input(value)
+            for key, value in kwargs.items()
         }
-        advanced = merge_advanced(kwargs.get("advanced"))
+        force_execute = bool(unwrapped.get("force_execute", True))
+        cache_inputs = {
+            key: value
+            for key, value in unwrapped.items()
+            if key not in _CACHE_IGNORED_INPUTS
+        }
+        advanced = merge_advanced(unwrapped.get("advanced"))
         cache_inputs.update({key: advanced[key] for key in ADVANCED_CACHE_KEYS})
         digest = deterministic_input_hash(cache_inputs)
-        if force_execute and int(kwargs.get("seed", -1)) < 0:
+        if force_execute and int(unwrapped.get("seed", -1)) < 0:
             return f"{digest}:force:{uuid.uuid4().hex}"
         return digest
 
@@ -363,9 +457,36 @@ class NInferQwenNode:
         unload_comfyui_before_launch: bool,
         unload_after_request: bool,
         no_cuda_graph: bool = True,
+        vision_max_side: int = DEFAULT_VISION_MAX_SIDE,
+        vision_format: str = "png",
+        vision_jpeg_quality: int = 85,
         advanced: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> tuple[str]:
+        system_prompt = _unwrap_input(system_prompt)
+        user_prompt = _unwrap_input(user_prompt)
+        context_size = _unwrap_input(context_size)
+        kv_capacity = _unwrap_input(kv_capacity)
+        max_output_tokens = _unwrap_input(max_output_tokens)
+        temperature = _unwrap_input(temperature)
+        seed = _unwrap_input(seed)
+        ninfer_executable = _unwrap_input(ninfer_executable)
+        models_dir = _unwrap_input(models_dir)
+        model_artifact = _unwrap_input(model_artifact)
+        vision = _unwrap_input(vision)
+        force_execute = _unwrap_input(force_execute)
+        unload_comfyui_before_launch = _unwrap_input(unload_comfyui_before_launch)
+        unload_after_request = _unwrap_input(unload_after_request)
+        no_cuda_graph = _unwrap_input(no_cuda_graph)
+        raw_vision_max_side = _unwrap_input(vision_max_side)
+        vision_max_side = int(
+            DEFAULT_VISION_MAX_SIDE
+            if raw_vision_max_side is None
+            else raw_vision_max_side
+        )
+        vision_format = str(_unwrap_input(vision_format) or "png").lower()
+        vision_jpeg_quality = int(_unwrap_input(vision_jpeg_quality) or 85)
+        advanced = _unwrap_input(advanced)
         settings = merge_advanced(advanced)
         timeouts = LifecycleTimeouts(
             startup_s=float(settings["startup_timeout"]),
@@ -384,12 +505,14 @@ class NInferQwenNode:
                     "An IMAGE input was provided, but vision is disabled. Enable vision "
                     "to launch NInfer with its media weights."
                 )
-            for image in images:
-                image_urls.extend(
-                    image_batch_to_data_urls(
-                        image, max_side=1024, output_format="jpeg", jpeg_quality=90
-                    )
+            image_urls.extend(
+                images_to_data_urls(
+                    images,
+                    max_side=vision_max_side,
+                    output_format=vision_format,
+                    jpeg_quality=vision_jpeg_quality,
                 )
+            )
 
         artifact_path = resolve_model_artifact(models_dir, model_artifact)
         derived_model_id = derive_model_id(artifact_path)

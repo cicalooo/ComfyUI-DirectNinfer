@@ -53,7 +53,7 @@ def merge_advanced(advanced: dict[str, Any] | None) -> dict[str, Any]:
 class AmpNInferAdvancedNode:
     """Bundle optional NInfer sampling and server settings."""
 
-    CATEGORY = "Amp NInfer"
+    CATEGORY = "DirectNinfer"
     FUNCTION = "build"
     RETURN_TYPES = ("AMP_NINFER_ADV",)
     RETURN_NAMES = ("advanced",)

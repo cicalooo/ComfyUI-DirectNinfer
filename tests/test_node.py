@@ -8,7 +8,8 @@ import pytest
 import nodes.ninfer_qwen_node as node_module
 from nodes.ninfer_advanced_node import AmpNInferAdvancedNode, merge_advanced
 from nodes.ninfer_qwen_node import NInferQwenNode, deterministic_input_hash
-from ninfer.models import derive_model_id, resolve_model_artifact, scan_ninfer_models
+import ninfer.models as models_module
+from ninfer.models import DEFAULT_MODELS_DIR, derive_model_id, resolve_model_artifact, scan_ninfer_models
 
 
 def _kwargs(tmp_path, **overrides):
@@ -126,6 +127,83 @@ def test_exception_still_tears_down_started_server(tmp_path, monkeypatch):
     assert calls == ["stop"]
 
 
+def test_is_changed_unwraps_input_is_list_widgets():
+    node = NInferQwenNode()
+    listed = node.IS_CHANGED(
+        user_prompt=["hello"],
+        seed=[123, 123],
+        force_execute=[False, False],
+        unload_comfyui_before_launch=[True],
+        unload_after_request=[True],
+        no_cuda_graph=[True],
+    )
+    scalar = node.IS_CHANGED(
+        user_prompt="hello",
+        seed=123,
+        force_execute=False,
+        unload_comfyui_before_launch=True,
+        unload_after_request=True,
+        no_cuda_graph=True,
+    )
+    assert listed == scalar
+
+
+def test_image_list_and_expanding_slots_are_collected(tmp_path, monkeypatch):
+    node = NInferQwenNode()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(node_module, "release_comfyui_memory", lambda: ())
+    monkeypatch.setattr(node_module, "snapshot_vram", lambda _device: None)
+    monkeypatch.setattr(
+        node_module,
+        "start_server",
+        lambda *args, **kwargs: SimpleNamespace(advertised_model_id="qwen3.8-27b"),
+    )
+    monkeypatch.setattr(node_module, "wait_until_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        node_module,
+        "stop_server",
+        lambda *args, **kwargs: SimpleNamespace(vram_reclaimed=True, notes=()),
+    )
+    monkeypatch.setattr(
+        node_module,
+        "complete",
+        lambda *args, **kwargs: SimpleNamespace(content="ok"),
+    )
+
+    original_build = node_module.build_chat_request
+
+    def capture_build(*args, **kwargs):
+        request = original_build(*args, **kwargs)
+        urls = []
+        for message in request.messages:
+            content = message.get("content")
+            if isinstance(content, list):
+                urls.extend(
+                    part["image_url"]["url"]
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "image_url"
+                )
+        captured["image_urls"] = urls
+        return request
+
+    monkeypatch.setattr(node_module, "build_chat_request", capture_build)
+
+    first = np.zeros((1, 2, 2, 3), dtype=np.float32)
+    second = np.ones((1, 2, 2, 3), dtype=np.float32)
+    third = np.full((1, 2, 2, 3), 0.5, dtype=np.float32)
+    node.enhance_prompt(
+        **_kwargs(
+            tmp_path,
+            vision=True,
+            image_list=[first, second],
+            image_1=third,
+        )
+    )
+    assert captured["image_urls"] is not None
+    assert len(list(captured["image_urls"])) == 3
+
+
 def test_image_requires_explicit_vision_enable(tmp_path, monkeypatch):
     node = NInferQwenNode()
     monkeypatch.setattr(node_module, "release_comfyui_memory", lambda: ())
@@ -176,3 +254,19 @@ def test_scan_and_resolve_model_artifact(tmp_path):
     assert resolved.endswith("qwen.ninfer")
     assert derive_model_id("qwen3_8_27b.ninfer") == "qwen3.8-27b"
     assert derive_model_id("Qwen3.8-27B-Uncensored.ninfer") == "Qwen3.8-27B-Uncensored"
+
+
+def test_default_models_directory_discovers_local_artifacts():
+    assert DEFAULT_MODELS_DIR.endswith("artifacts")
+    assert "Qwen3.8-27B-Uncensored.ninfer" in scan_ninfer_models(DEFAULT_MODELS_DIR)
+
+
+def test_legacy_windows_models_dir_falls_back_to_default(tmp_path, monkeypatch):
+    fallback_dir = tmp_path / "artifacts"
+    fallback_dir.mkdir()
+    (fallback_dir / "model.ninfer").write_bytes(b"fake")
+    monkeypatch.setattr(models_module, "DEFAULT_MODELS_DIR", str(fallback_dir))
+
+    resolved = resolve_model_artifact(r"C:\models", "model.ninfer")
+
+    assert resolved == str(fallback_dir / "model.ninfer")

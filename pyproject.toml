@@ -1,6 +1,6 @@
 [project]
-name = "comfyui-amp-ninfer"
-description = "ComfyUI custom nodes for local NInfer prompt generation with optional vision inputs."
+name = "comfyui-directninfer"
+description = "ComfyUI custom nodes for local NInfer prompt generation on Windows and Linux."
 version = "0.1.0"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -12,11 +12,11 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/cicalooo/ComfyUI-amp-ninfer"
+Repository = "https://github.com/cicalooo/ComfyUI-DirectNinfer"
 
 [tool.comfy]
 PublisherId = "cicalooo"
-DisplayName = "Amp NInfer"
+DisplayName = "DirectNinfer"
 Icon = ""
 web = "web"
 

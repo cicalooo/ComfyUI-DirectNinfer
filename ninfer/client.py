@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import math
+import time
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener
@@ -37,6 +38,58 @@ class NInferHTTPError(NInferClientError):
 
 class NInferProtocolError(NInferClientError):
     """The server returned JSON that does not match the expected contract."""
+
+
+def is_connection_reset_error(exc: BaseException) -> bool:
+    """True when the peer closed the TCP socket mid-request (WinError 10054)."""
+
+    messages: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current))
+        winerror = getattr(current, "winerror", None)
+        errno = getattr(current, "errno", None)
+        if winerror == 10054 or errno in {10054, 104, 54}:
+            return True
+        current = current.__cause__ or current.__context__
+    blob = " ".join(messages).lower()
+    return any(
+        token in blob
+        for token in (
+            "10054",
+            "connection reset",
+            "forcibly closed",
+            "connection aborted",
+            "broken pipe",
+        )
+    )
+
+
+def is_connection_refused_error(exc: BaseException) -> bool:
+    """True when nothing is listening anymore (WinError 10061 / ECONNREFUSED)."""
+
+    messages: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current))
+        winerror = getattr(current, "winerror", None)
+        errno = getattr(current, "errno", None)
+        if winerror == 10061 or errno in {10061, 111, 61}:
+            return True
+        current = current.__cause__ or current.__context__
+    blob = " ".join(messages).lower()
+    return any(
+        token in blob
+        for token in (
+            "10061",
+            "actively refused",
+            "connection refused",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -246,6 +299,8 @@ class NInferClient:
         *,
         body: Mapping[str, Any] | None = None,
         timeout_s: float = 30.0,
+        retries: int = 0,
+        retry_backoff_s: float = 0.35,
     ) -> HTTPResult:
         data = None
         headers = {"Accept": "application/json"}
@@ -254,37 +309,51 @@ class NInferClient:
             headers["Content-Type"] = "application/json"
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        request = Request(self._url(path), data=data, headers=headers, method=method)
-        try:
-            with self._opener.open(request, timeout=timeout_s) as response:
-                return HTTPResult(
-                    status=int(response.status),
-                    body=response.read(),
-                    headers=dict(response.headers.items()),
-                )
-        except HTTPError as exc:
+        attempts = max(1, int(retries) + 1)
+        last_error: BaseException | None = None
+        for attempt in range(attempts):
+            request = Request(self._url(path), data=data, headers=headers, method=method)
             try:
-                error_body = exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                error_body = ""
-            raise NInferHTTPError(exc.code, str(exc.reason), error_body) from exc
-        except URLError as exc:
-            reason = getattr(exc, "reason", exc)
-            if isinstance(reason, (TimeoutError, OSError)) and (
-                isinstance(reason, TimeoutError)
-                or "timed out" in str(reason).lower()
-            ):
+                with self._opener.open(request, timeout=timeout_s) as response:
+                    return HTTPResult(
+                        status=int(response.status),
+                        body=response.read(),
+                        headers=dict(response.headers.items()),
+                    )
+            except HTTPError as exc:
+                try:
+                    error_body = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    error_body = ""
+                raise NInferHTTPError(exc.code, str(exc.reason), error_body) from exc
+            except URLError as exc:
+                reason = getattr(exc, "reason", exc)
+                if isinstance(reason, (TimeoutError, OSError)) and (
+                    isinstance(reason, TimeoutError)
+                    or "timed out" in str(reason).lower()
+                ):
+                    raise NInferTimeoutError(
+                        f"NInfer request timed out after {timeout_s:.2f}s"
+                    ) from exc
+                wrapped = NInferClientError(f"NInfer connection failed: {reason}")
+                wrapped.__cause__ = exc
+                last_error = wrapped
+            except TimeoutError as exc:
+                # urllib can surface socket.timeout directly on some Python builds.
                 raise NInferTimeoutError(
                     f"NInfer request timed out after {timeout_s:.2f}s"
                 ) from exc
-            raise NInferClientError(f"NInfer connection failed: {reason}") from exc
-        except TimeoutError as exc:
-            # urllib can surface socket.timeout directly on some Python builds.
-            raise NInferTimeoutError(
-                f"NInfer request timed out after {timeout_s:.2f}s"
-            ) from exc
-        except OSError as exc:
-            raise NInferClientError(f"NInfer connection failed: {exc}") from exc
+            except OSError as exc:
+                wrapped = NInferClientError(f"NInfer connection failed: {exc}")
+                wrapped.__cause__ = exc
+                last_error = wrapped
+            if last_error is None:
+                break
+            if attempt + 1 >= attempts or not is_connection_reset_error(last_error):
+                raise last_error from last_error.__cause__
+            time.sleep(retry_backoff_s * (attempt + 1))
+        assert last_error is not None
+        raise last_error from last_error.__cause__
 
     def get_json(self, path: str, *, timeout_s: float = 30.0) -> Mapping[str, Any]:
         result = self.request("GET", path, timeout_s=timeout_s)
@@ -296,12 +365,20 @@ class NInferClient:
             raise NInferProtocolError(f"{path} JSON response must be an object")
         return value
 
-    def complete(self, request: ChatRequest) -> ChatResponse:
+    def complete(
+        self,
+        request: ChatRequest,
+        *,
+        retries: int = 1,
+        retry_backoff_s: float = 0.35,
+    ) -> ChatResponse:
         result = self.request(
             "POST",
             "/v1/chat/completions",
             body=request.payload(),
             timeout_s=request.timeout_s,
+            retries=retries,
+            retry_backoff_s=retry_backoff_s,
         )
         try:
             value = json.loads(result.body.decode("utf-8"))

@@ -9,10 +9,12 @@ import pytest
 
 from ninfer.client import (
     NInferClient,
+    NInferClientError,
     NInferHTTPError,
     NInferProtocolError,
     NInferTimeoutError,
     build_chat_request,
+    is_connection_reset_error,
     parse_chat_response,
 )
 
@@ -144,3 +146,57 @@ def test_malformed_response_and_timeout():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_connection_reset_detection_and_retry(monkeypatch):
+    assert is_connection_reset_error(
+        ConnectionResetError(10054, "An existing connection was forcibly closed")
+    )
+    client = NInferClient("http://127.0.0.1:9")
+    calls = {"n": 0}
+
+    class _Boom:
+        def open(self, *_args, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionResetError(
+                    10054, "An existing connection was forcibly closed by the remote host"
+                )
+
+            class _Resp:
+                status = 200
+                headers = {}
+
+                def read(self):
+                    return b'{"choices":[{"message":{"content":"recovered"}}]}'
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_exc):
+                    return False
+
+            return _Resp()
+
+    client._opener = _Boom()
+    monkeypatch.setattr("ninfer.client.time.sleep", lambda *_args, **_kwargs: None)
+    request = build_chat_request(
+        model_id="qwen3.8-27b",
+        system_prompt="",
+        user_prompt="hello",
+    )
+    response = client.complete(request, retries=1, retry_backoff_s=0.0)
+    assert response.content == "recovered"
+    assert calls["n"] == 2
+
+    calls["n"] = 0
+
+    class _AlwaysBoom:
+        def open(self, *_args, **_kwargs):
+            calls["n"] += 1
+            raise ConnectionResetError(10054, "forcibly closed")
+
+    client._opener = _AlwaysBoom()
+    with pytest.raises(NInferClientError, match="connection failed"):
+        client.complete(request, retries=1, retry_backoff_s=0.0)
+    assert calls["n"] == 2

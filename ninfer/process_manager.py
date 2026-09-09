@@ -1,4 +1,4 @@
-"""Lifecycle management for a short-lived Windows NInfer server.
+"""Lifecycle management for a short-lived NInfer server on Windows or Linux.
 
 NInfer owns CUDA allocations in a native process, so clearing ComfyUI's
 Python objects is not enough to release the model.  This module treats child
@@ -20,7 +20,7 @@ import signal
 import subprocess
 import threading
 import time
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .client import (
     ChatRequest,
@@ -29,6 +29,8 @@ from .client import (
     NInferClientError,
     NInferHTTPError,
     NInferTimeoutError,
+    is_connection_refused_error,
+    is_connection_reset_error,
 )
 from .vram import VramSnapshot, VramWaitResult, snapshot_vram, wait_for_vram_reclaim
 
@@ -78,7 +80,7 @@ class LifecycleTimeouts:
 class ServerConfig:
     """Validated inputs used to construct one ``ninfer-serve`` command."""
 
-    executable: str = "ninfer-serve.exe"
+    executable: str = "ninfer-serve.exe" if os.name == "nt" else "ninfer-serve"
     model_artifact: str = ""
     host: str = "127.0.0.1"
     port: int = 8080
@@ -175,7 +177,7 @@ _TYPED_FLAG_NAMES = {
 
 
 def parse_launch_flags(value: str | Sequence[str] | None) -> tuple[str, ...]:
-    """Parse a Windows-friendly extra flag string without invoking a shell."""
+    """Parse extra flags using the host shell's quoting conventions."""
 
     if value is None:
         return ()
@@ -183,7 +185,7 @@ def parse_launch_flags(value: str | Sequence[str] | None) -> tuple[str, ...]:
         if not value.strip():
             return ()
         try:
-            tokens = shlex.split(value, posix=False)
+            tokens = shlex.split(value, posix=os.name != "nt")
         except ValueError as exc:
             raise NInferConfigurationError(f"invalid server launch flags: {exc}") from exc
         cleaned: list[str] = []
@@ -206,7 +208,7 @@ def _resolve_executable(executable: str) -> Path:
         return Path(found).resolve()
     raise NInferConfigurationError(
         f"NInfer executable was not found: {executable!r}. "
-        "Set the full path to ninfer-serve.exe."
+        "Set the full path to ninfer-serve (Linux) or ninfer-serve.exe (Windows)."
     )
 
 
@@ -416,7 +418,7 @@ def validate_server_config(config: ServerConfig) -> tuple[Path, Path]:
             raise NInferConfigurationError(
                 "installed NInfer does not advertise these configured flags: "
                 + ", ".join(missing)
-                + ". Run ninfer-serve.exe --help and adjust the node settings."
+                + ". Run the configured NInfer executable with --help and adjust the node settings."
             )
     return executable, artifact
 
@@ -559,18 +561,71 @@ def wait_until_ready(
     )
 
 
+def _vision_reset_hint(request: ChatRequest, stderr_tail: str, exit_code: int | None) -> str:
+    has_images = any(
+        isinstance(message.get("content"), list)
+        and any(
+            isinstance(part, dict) and part.get("type") == "image_url"
+            for part in message["content"]
+        )
+        for message in request.messages
+        if isinstance(message, Mapping)
+    )
+    stderr_l = stderr_tail.lower()
+    heap_corrupt = exit_code in {3221226356, -1073740940}  # STATUS_HEAP_CORRUPTION
+    if not has_images and "swscaler" not in stderr_l and not heap_corrupt:
+        return ""
+    return (
+        "; ninfer-serve crashed while decoding vision input "
+        f"(exit={exit_code}). The node now converts every ComfyUI IMAGE to a "
+        "small RGB PNG on the fly; retry with vision_max_side=336/280, one "
+        "frame, lower context/kv together, and unload_comfyui_before_launch "
+        "enabled. JPEG wire format is rewritten to PNG because FFmpeg/swscaler "
+        "JPEG paths can heap-corrupt this Windows runtime."
+    )
+
+
 def complete(handle: ServerHandle, request: ChatRequest) -> ChatResponse:
     """Send one request through the managed server."""
 
     client = NInferClient(handle.base_url, api_key=handle.config.api_key)
-    try:
-        return client.complete(request)
-    except NInferTimeoutError:
-        raise
-    except NInferHTTPError:
-        raise
-    except NInferClientError:
-        raise
+    last_error: BaseException | None = None
+    for attempt in range(2):
+        try:
+            # No client-side multi-retry: if ninfer dies mid-request the next
+            # attempt becomes WinError 10061. We only retry when the process
+            # is still alive after a reset.
+            return client.complete(request, retries=0)
+        except NInferTimeoutError:
+            raise
+        except NInferHTTPError:
+            raise
+        except NInferClientError as exc:
+            last_error = exc
+            exit_code = handle.process.poll()
+            if (
+                attempt == 0
+                and exit_code is None
+                and is_connection_reset_error(exc)
+                and not is_connection_refused_error(exc)
+            ):
+                time.sleep(0.35)
+                continue
+            tail = handle.diagnostic_tail()
+            if (
+                exit_code is not None
+                or tail
+                or is_connection_reset_error(exc)
+                or is_connection_refused_error(exc)
+            ):
+                detail = f"{exc}; ninfer exit={exit_code}"
+                if tail:
+                    detail += f"; stderr={tail[:1200]}"
+                detail += _vision_reset_hint(request, tail, exit_code)
+                raise NInferClientError(detail) from exc
+            raise
+    assert last_error is not None
+    raise last_error
 
 
 def _request_graceful_stop(process: subprocess.Popen[str]) -> bool:

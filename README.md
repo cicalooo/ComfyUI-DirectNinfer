@@ -1,105 +1,59 @@
-# Amp NInfer for ComfyUI
+# ComfyUI-DirectNinfer
 
-Amp NInfer uses a local [NInfer](https://github.com/Don-Chad/ninfer-3090)
-server to rewrite image-generation prompts and returns the result as a ComfyUI
-`STRING`. It can use native ComfyUI images as visual context and shuts down its
-NInfer process after each request to release VRAM.
+ComfyUI custom nodes that use a local [NInfer](https://github.com/Don-Chad/ninfer-3090) server to improve image-generation prompts. The server is started for a request and stopped afterwards so its CUDA allocations are released. Optional ComfyUI images can be supplied as visual context.
 
-The tested path is Windows 11 with a 24 GB RTX 3090. NInfer executables are
-GPU-architecture specific; see the
-[GPU installation guide](GPU_INSTALLATION_GUIDE.md) for RTX 40-series,
-RTX 50-series, Linux, and source-build guidance.
+Windows and Linux are supported. NInfer binaries are GPU-architecture specific; the tested profile is an RTX 3090 (24 GB, `sm_86`).
 
 ## Install
 
-Clone the node into the `custom_nodes` directory of your ComfyUI installation:
+From the `custom_nodes` directory of your ComfyUI installation:
 
 ```console
-cd path/to/ComfyUI/custom_nodes
-git clone https://github.com/cicalooo/ComfyUI-amp-ninfer.git
-cd ComfyUI-amp-ninfer
+git clone https://github.com/cicalooo/ComfyUI-DirectNinfer.git
+cd ComfyUI-DirectNinfer
 python -m pip install -r requirements.txt
 ```
 
-Run the last command with the same Python environment that starts ComfyUI
-(including ComfyUI's embedded Python when applicable), then restart ComfyUI.
-ComfyUI supplies PyTorch and CUDA; this repository deliberately does not
-install another Torch build.
+Use the same Python environment that starts ComfyUI, then restart ComfyUI. The package does not install PyTorch or CUDA.
 
-## Install NInfer and a model
+## Configure NInfer
 
-The node does not bundle or download an NInfer runtime or model.
+The node does not bundle a runtime or model. Install a NInfer build for the GPU and operating system, then download a compatible `.ninfer` model.
 
-1. For the tested RTX 3090 path, download and extract the
-   [NInfer-3090 Windows release](https://github.com/Don-Chad/ninfer-3090/releases/tag/v0.6.0-rtx3090).
-   Keep the runtime outside this repository.
-2. Download a compatible `.ninfer` model. The tested Qwen3.8-27B artifact and
-   its SHA-256 are linked in [artifacts/README.md](artifacts/README.md). Keep
-   model files outside this repository as well.
-3. Add **Amp NInfer** to a workflow and set:
+| Platform | Executable example |
+| --- | --- |
+| Windows | `C:\ninfer\ninfer-serve.exe` |
+| Linux | `/opt/ninfer-3090/current/ninfer-serve` |
 
-   - `ninfer_executable` to the full absolute path of `ninfer-serve.exe` (or
-     `ninfer-serve` on Linux);
-   - `models_dir` to the directory containing the `.ninfer` files;
-   - `model_artifact` from the dropdown. Click **Refresh** after changing
-     `models_dir` or adding a model.
+Add **DirectNinfer** to a workflow and set `ninfer_executable` to the absolute executable path, `models_dir` to the directory containing `.ninfer` files, and `model_artifact` to a selected model. Click **Refresh** after changing the directory.
 
-There is no user-facing `model_id` setting. The node derives a launch ID from
-the artifact name and uses the ID advertised by the server at `/v1/models`.
+The executable can also be supplied through `NINFER_EXECUTABLE`. If it is not set, Windows uses `ninfer-serve.exe`; Linux uses `ninfer-serve` (or the tested `/opt/ninfer-3090/current/ninfer-serve` when present). The model ID is read from the server's `/v1/models` response.
 
 ## Nodes
 
-### Amp NInfer
+### DirectNinfer
 
-This is the main prompt-rewriting node. `system_prompt` supplies the rewrite
-instructions and `user_prompt` supplies the prompt to improve; they are the
-only prompt fields. The output connects to a text encoder or any other ComfyUI
-input that accepts a `STRING`.
+Rewrites `user_prompt` according to `system_prompt` and returns a `STRING`. Connect `image_list` or the expanding `IMAGE` inputs for visual context. Images are converted to small RGB PNG data URLs before they are sent to NInfer.
 
-The default `context_size` and `kv_capacity` are both `16384`, with steps of
-`1024`. A fixed non-negative seed reuses the generated text; the default seed
-of `-1` makes a fresh request on each execution.
+### DirectNinfer Advanced
 
-To use visual context, enable `vision` and connect an image to `image_1`. Only
-that socket is shown at first. Connecting it adds `image_2`, and so on, up to
-`image_20`. Disconnecting trailing images removes unused slots. These are
-native ComfyUI `IMAGE` inputs; the node does not accept arbitrary image URLs or
-file paths.
+Provides optional sampling, server, speculative-decoding, launch-flag, and timeout settings. Connect its `advanced` output to the main node; leaving it disconnected uses the built-in defaults.
 
-### Amp NInfer Advanced
+## GPU and runtime notes
 
-This optional companion node groups sampling, reasoning, server, speculative
-decoding, launch-flag, and timeout settings. Connect its `advanced` output to
-the optional `advanced` input on **Amp NInfer**. Leave it disconnected to use
-the built-in defaults.
+Use a runtime built for the target GPU architecture. For RTX 3090, see the [NInfer-3090 releases](https://github.com/Don-Chad/ninfer-3090/releases) and the [GPU installation guide](GPU_INSTALLATION_GUIDE.md). Keep runtime and model files outside this repository.
 
-## RTX 3090 notes
-
-The linked Windows runtime targets Ampere `sm_86` and is the tested path. Do
-not use it on an RTX 40-series or RTX 50-series GPU; use a runtime built for
-the target architecture.
-
-On the tested 24 GB profile, leave `no_cuda_graph`,
-`unload_comfyui_before_launch`, and `unload_after_request` enabled initially.
-If NInfer runs out of memory during startup, reduce `context_size` and
-`kv_capacity` together in `1024`-token steps, disable speculation through
-**Amp NInfer Advanced**, and leave `vision` off until text-only startup works.
-Avoid keeping another large CUDA model resident while NInfer starts.
-
-For runtime selection, model verification, and troubleshooting, use the
-[GPU installation guide](GPU_INSTALLATION_GUIDE.md).
+On a 24 GB GPU, start with `no_cuda_graph`, `unload_comfyui_before_launch`, and `unload_after_request` enabled. If startup runs out of memory, reduce `context_size` and `kv_capacity` together and disable speculation.
 
 ## Tests
 
-The tests use local fakes and do not require a GPU, model, or NInfer binary.
-From the repository root in PowerShell:
+The test suite uses local fakes and does not require a GPU, model, or NInfer:
 
-```powershell
-$env:PYTHONPATH = (Get-Location).Path
+```bash
 python -m pytest -q
 ```
 
-Hardware integration tests remain opt-in.
+Hardware tests are opt-in.
 
 ## License
 

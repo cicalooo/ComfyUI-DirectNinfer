@@ -231,6 +231,15 @@ close other CUDA applications. Re-enable features one at a time.
 server use the same `host`/`port`, that the port is free, and that the
 executable can run with `--help` from the same user account as ComfyUI.
 
+**`WinError 10054` / `10061` after `listening on http://127.0.0.1:8080`**
+— the weights loaded and `/health` passed, then the completion request aborted
+the socket. Exit `3221226356` (`STATUS_HEAP_CORRUPTION`) with `swscaler` in
+stderr means ninfer-serve crashed while decoding vision media. The node now
+converts every ComfyUI IMAGE to RGB PNG on the fly and rewrites JPEG wire
+format to PNG. If it still crashes, lower `vision_max_side` to `336` or `280`,
+send one frame, reduce `context_size`/`kv_capacity` together, and keep
+`unload_comfyui_before_launch` enabled. Confirm text-only works before vision.
+
 **The model is rejected** — verify the SHA-256 and select the exact
 `.ninfer` artifact. Amp NInfer uses the id advertised on `/v1/models`.
 

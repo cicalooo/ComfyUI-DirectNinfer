@@ -1,6 +1,23 @@
 """ComfyUI custom-node package for short-lived NInfer prompt enhancement."""
 
+import logging
+
 __version__ = "0.1.0"
+
+_LOGGER = logging.getLogger(__name__)
+
+try:
+    try:
+        from .ninfer.comfy_model_management_patch import install_comfy_model_management_patch
+    except ImportError:
+        from ninfer.comfy_model_management_patch import install_comfy_model_management_patch
+
+    install_comfy_model_management_patch()
+except Exception:
+    _LOGGER.warning(
+        "directninfer: failed to install ComfyUI model_management patch",
+        exc_info=True,
+    )
 
 try:
     from .ninfer.models import (
@@ -24,8 +41,8 @@ NODE_CLASS_MAPPINGS = {
     "AmpNInferAdvanced": AmpNInferAdvancedNode,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "NInferQwenNode": "Amp NInfer",
-    "AmpNInferAdvanced": "Amp NInfer Advanced",
+    "NInferQwenNode": "DirectNinfer",
+    "AmpNInferAdvanced": "DirectNinfer Advanced",
 }
 WEB_DIRECTORY = "./web"
 
