@@ -283,3 +283,32 @@ def test_model_artifact_requires_ninfer_extension(tmp_path):
 
     with pytest.raises(ValueError, match=r"\.ninfer file"):
         resolve_model_artifact(str(tmp_path), artifact.name)
+
+def test_resolve_model_artifact_finds_nested_artifacts_dir(tmp_path):
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    model = artifacts_dir / "Qwen3.8-27B-Uncensored.ninfer"
+    model.write_bytes(b"fake")
+
+    # When models_dir points to parent directory, basename still resolves to artifacts/
+    resolved = resolve_model_artifact(str(tmp_path), "Qwen3.8-27B-Uncensored.ninfer")
+    assert resolved == str(model)
+
+
+def test_validate_inputs_method(tmp_path):
+    model = tmp_path / "model.ninfer"
+    model.write_bytes(b"fake")
+
+    # Valid artifact returns True
+    assert NInferQwenNode.VALIDATE_INPUTS("model.ninfer", str(tmp_path)) is True
+
+    # Empty placeholder returns error message
+    err_placeholder = NInferQwenNode.VALIDATE_INPUTS("(no .ninfer files found)", str(tmp_path))
+    assert isinstance(err_placeholder, str)
+    assert "No .ninfer" in err_placeholder
+
+    # Non-existent artifact returns error message
+    err_missing = NInferQwenNode.VALIDATE_INPUTS("missing.ninfer", str(tmp_path))
+    assert isinstance(err_missing, str)
+    assert "could not be resolved" in err_missing
+

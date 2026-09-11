@@ -105,6 +105,60 @@ def test_command_construction_and_launch_flag_parser():
     )
 
 
+def test_command_clamps_kv_capacity_to_ninfer_usable_range():
+    oversized = ServerConfig(
+        executable="ninfer-serve.exe",
+        model_artifact="model.ninfer",
+        max_context=4096,
+        kv_capacity=16384,
+        max_concurrency=1,
+        spec_backend=None,
+        draft_tokens=None,
+        lm_head_draft=False,
+    )
+    command = build_command(oversized)
+    assert command[command.index("--kv-capacity") + 1] == "4096"
+
+    concurrent = ServerConfig(
+        executable="ninfer-serve.exe",
+        model_artifact="model.ninfer",
+        max_context=4096,
+        kv_capacity=32768,
+        max_concurrency=2,
+        spec_backend=None,
+        draft_tokens=None,
+        lm_head_draft=False,
+    )
+    command = build_command(concurrent)
+    assert command[command.index("--kv-capacity") + 1] == "8192"
+
+    exact = ServerConfig(
+        executable="ninfer-serve.exe",
+        model_artifact="model.ninfer",
+        max_context=4096,
+        kv_capacity=4096,
+        max_concurrency=1,
+        spec_backend=None,
+        draft_tokens=None,
+        lm_head_draft=False,
+    )
+    command = build_command(exact)
+    assert command[command.index("--kv-capacity") + 1] == "4096"
+
+    automatic = ServerConfig(
+        executable="ninfer-serve.exe",
+        model_artifact="model.ninfer",
+        max_context=4096,
+        kv_capacity="auto",
+        max_concurrency=1,
+        spec_backend=None,
+        draft_tokens=None,
+        lm_head_draft=False,
+    )
+    command = build_command(automatic)
+    assert command[command.index("--kv-capacity") + 1] == "auto"
+
+
 def test_validation_rejects_unsupported_flags(tmp_path, monkeypatch):
     artifact = tmp_path / "model.ninfer"
     artifact.write_bytes(b"test")

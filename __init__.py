@@ -6,6 +6,7 @@ try:
     from .ninfer.models import (
         DEFAULT_MODELS_DIR,
         EMPTY_MODEL_PLACEHOLDER,
+        native_model_names,
         scan_ninfer_models,
     )
     from .nodes.ninfer_advanced_node import AmpNInferAdvancedNode
@@ -14,6 +15,7 @@ except ImportError:  # Allows a direct loader/test import of this file.
     from ninfer.models import (
         DEFAULT_MODELS_DIR,
         EMPTY_MODEL_PLACEHOLDER,
+        native_model_names,
         scan_ninfer_models,
     )
     from nodes.ninfer_advanced_node import AmpNInferAdvancedNode
@@ -51,6 +53,10 @@ if _prompt_server is not None and web is not None:
         if not isinstance(directory, str) or not directory.strip():
             directory = DEFAULT_MODELS_DIR
         models = scan_ninfer_models(directory)
+        if models == [EMPTY_MODEL_PLACEHOLDER]:
+            native = native_model_names()
+            if native and native != [EMPTY_MODEL_PLACEHOLDER]:
+                models = native
         payload = {"models": models}
         if models == [EMPTY_MODEL_PLACEHOLDER]:
             payload["error"] = f"No .ninfer files found under {directory}"

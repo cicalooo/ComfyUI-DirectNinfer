@@ -240,9 +240,38 @@ def _extra_flag_names(extra_flags: Sequence[str]) -> set[str]:
     return names
 
 
+def fit_kv_capacity(
+    max_context: int, kv_capacity: int | str, max_concurrency: int
+) -> int | str:
+    """Clamp explicit KV tokens into NInfer's usable page range.
+
+    After the model loads, ninfer-serve rejects ``kv_capacity`` whose page
+    count is outside ``[max(ceil(max_context/P), C), C * ceil(max_context/P)]``.
+    For token values this is ``[max_context, max_context * max_concurrency]``.
+    """
+
+    if kv_capacity == "auto" or not isinstance(kv_capacity, int):
+        return kv_capacity
+    ceiling = max_context * max_concurrency
+    if kv_capacity <= ceiling:
+        return kv_capacity
+    LOGGER.warning(
+        "NInfer kv_capacity %s exceeds the usable range for max_context=%s "
+        "max_concurrency=%s; clamping to %s",
+        kv_capacity,
+        max_context,
+        max_concurrency,
+        ceiling,
+    )
+    return ceiling
+
+
 def build_command(config: ServerConfig, *, executable: str | Path | None = None) -> list[str]:
     """Construct the argument vector passed to NInfer, never through a shell."""
 
+    kv_capacity = fit_kv_capacity(
+        config.max_context, config.kv_capacity, config.max_concurrency
+    )
     command = [
         str(executable if executable is not None else config.executable),
         str(config.model_artifact),
@@ -257,7 +286,7 @@ def build_command(config: ServerConfig, *, executable: str | Path | None = None)
         "--max-context",
         str(config.max_context),
         "--kv-capacity",
-        str(config.kv_capacity),
+        str(kv_capacity),
         "--max-concurrency",
         str(config.max_concurrency),
         "--max-pending-requests",

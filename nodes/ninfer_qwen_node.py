@@ -97,10 +97,14 @@ def _default_ninfer_executable() -> str:
     if configured:
         return configured
     if os.name == "nt":
-        return (
-            r"C:\ninfer\ninfer-rtx3090-windows-x64-0.6.0-rtx3090"
-            r"\ninfer-serve.exe"
-        )
+        for candidate in (
+            r"C:\ninfer\ninfer-serve.exe",
+            r"C:\ninfer\ninfer-rtx3090-windows-x64-0.6.1-rtx3090\ninfer-serve.exe",
+            r"C:\ninfer\ninfer-rtx3090-windows-x64-0.6.0-rtx3090\ninfer-serve.exe",
+        ):
+            if Path(candidate).is_file():
+                return candidate
+        return r"C:\ninfer\ninfer-serve.exe"
     installed = Path("/opt/ninfer-3090/current/ninfer-serve")
     return str(installed) if installed.is_file() else "ninfer-serve"
 
@@ -334,7 +338,7 @@ class NInferQwenNode:
                         "min": 1024,
                         "max": 262144,
                         "step": 1024,
-                        "tooltip": "KV cache size; must be ≥ context. Steps of 1024.",
+                        "tooltip": "Shared KV tokens. With concurrency 1 this cannot exceed context; extra is clamped.",
                     },
                 ),
                 "max_output_tokens": (
@@ -420,6 +424,26 @@ class NInferQwenNode:
             },
             "optional": optional,
         }
+
+    @classmethod
+    def VALIDATE_INPUTS(
+        cls,
+        model_artifact: str = "",
+        models_dir: str = "",
+    ) -> bool | str:
+        """Validate model_artifact dynamically against ComfyUI registry and models_dir."""
+        artifact_str = str(_unwrap_input(model_artifact) or "").strip()
+        dir_str = str(_unwrap_input(models_dir) or "").strip()
+        if not artifact_str or artifact_str.startswith("(no .ninfer"):
+            return "No .ninfer model artifact selected. Set models_dir and click Refresh."
+        path = native_model_path(artifact_str)
+        if path is not None:
+            return True
+        try:
+            resolve_model_artifact(dir_str or DEFAULT_MODELS_DIR, artifact_str)
+            return True
+        except Exception as exc:
+            return f"Model artifact '{artifact_str}' could not be resolved: {exc}"
 
     @classmethod
     def IS_CHANGED(cls, **kwargs: Any) -> str:
