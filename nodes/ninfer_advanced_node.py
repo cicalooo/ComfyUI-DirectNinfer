@@ -1,4 +1,4 @@
-"""Optional advanced settings for Amp NInfer."""
+"""Optional advanced settings for DirectNinfer."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ ADVANCED_DEFAULTS: dict[str, Any] = {
     "repetition_penalty": 1.05,
     "frequency_penalty": 0.0,
     "host": "127.0.0.1",
-    "port": 8080,
+    "port": 0,
     "device": 0,
     "speculative_backend": "mtp",
     "draft_tokens": 3,
@@ -115,17 +115,17 @@ class AmpNInferAdvancedNode:
                     {
                         "default": ADVANCED_DEFAULTS["host"],
                         "multiline": False,
-                        "tooltip": "Bind address for ninfer-serve.",
+                        "tooltip": "Loopback bind address for ninfer-serve.",
                     },
                 ),
                 "port": (
                     "INT",
                     {
                         "default": ADVANCED_DEFAULTS["port"],
-                        "min": 1,
+                        "min": 0,
                         "max": 65535,
                         "step": 1,
-                        "tooltip": "TCP port for ninfer-serve.",
+                        "tooltip": "TCP port; 0 automatically selects a free loopback port.",
                     },
                 ),
                 "device": (

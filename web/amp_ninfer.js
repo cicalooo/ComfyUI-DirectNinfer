@@ -100,12 +100,12 @@ app.registerExtension({
                     });
                     const data = await resp.json();
                     if (data.error) {
-                        console.warn("[Amp NInfer]", data.error);
+                        console.warn("[DirectNinfer]", data.error);
                     }
                     setComboValues(modelWidget, data.models);
                     this.setDirtyCanvas(true, true);
                 } catch (error) {
-                    console.error("[Amp NInfer] Failed to refresh models:", error);
+                    console.error("[DirectNinfer] Failed to refresh models:", error);
                 }
             };
 

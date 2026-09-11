@@ -10,10 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import math
+import queue
+import threading
 import time
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, build_opener
+from urllib.request import ProxyHandler, Request, build_opener
 
 
 class NInferClientError(RuntimeError):
@@ -22,6 +24,10 @@ class NInferClientError(RuntimeError):
 
 class NInferTimeoutError(NInferClientError, TimeoutError):
     """The health check or generation request exceeded its timeout."""
+
+
+class NInferCancelledError(NInferClientError):
+    """The ComfyUI execution was interrupted while NInfer was generating."""
 
 
 class NInferHTTPError(NInferClientError):
@@ -285,7 +291,9 @@ class NInferClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self._opener = opener or build_opener()
+        # This client only talks to the short-lived loopback server. Ignoring
+        # environment proxy settings keeps prompts and image data local.
+        self._opener = opener or build_opener(ProxyHandler({}))
 
     def _url(self, path: str) -> str:
         if not path.startswith("/"):
@@ -371,15 +379,42 @@ class NInferClient:
         *,
         retries: int = 1,
         retry_backoff_s: float = 0.35,
+        cancel_check: Any | None = None,
     ) -> ChatResponse:
-        result = self.request(
-            "POST",
-            "/v1/chat/completions",
-            body=request.payload(),
-            timeout_s=request.timeout_s,
-            retries=retries,
-            retry_backoff_s=retry_backoff_s,
-        )
+        def do_request() -> HTTPResult:
+            return self.request(
+                "POST", "/v1/chat/completions", body=request.payload(),
+                timeout_s=request.timeout_s, retries=retries,
+                retry_backoff_s=retry_backoff_s,
+            )
+
+        if cancel_check is None:
+            result = do_request()
+        else:
+            result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+            def worker() -> None:
+                try:
+                    result_queue.put((True, do_request()))
+                except BaseException as exc:
+                    result_queue.put((False, exc))
+
+            threading.Thread(target=worker, name="ninfer-request", daemon=True).start()
+            deadline = time.monotonic() + request.timeout_s
+            while True:
+                try:
+                    succeeded, value = result_queue.get(timeout=0.1)
+                    if not succeeded:
+                        raise value
+                    result = value
+                    break
+                except queue.Empty:
+                    if cancel_check():
+                        raise NInferCancelledError("NInfer request cancelled by ComfyUI")
+                    if time.monotonic() >= deadline:
+                        raise NInferTimeoutError(
+                            f"NInfer request timed out after {request.timeout_s:.2f}s"
+                        )
         try:
             value = json.loads(result.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

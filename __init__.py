@@ -1,23 +1,6 @@
 """ComfyUI custom-node package for short-lived NInfer prompt enhancement."""
 
-import logging
-
 __version__ = "0.1.0"
-
-_LOGGER = logging.getLogger(__name__)
-
-try:
-    try:
-        from .ninfer.comfy_model_management_patch import install_comfy_model_management_patch
-    except ImportError:
-        from ninfer.comfy_model_management_patch import install_comfy_model_management_patch
-
-    install_comfy_model_management_patch()
-except Exception:
-    _LOGGER.warning(
-        "directninfer: failed to install ComfyUI model_management patch",
-        exc_info=True,
-    )
 
 try:
     from .ninfer.models import (
@@ -62,7 +45,11 @@ if _prompt_server is not None and web is not None:
             data = await request.json()
         except Exception:
             data = {}
-        directory = (data or {}).get("dir") or DEFAULT_MODELS_DIR
+        if not isinstance(data, dict):
+            data = {}
+        directory = data.get("dir")
+        if not isinstance(directory, str) or not directory.strip():
+            directory = DEFAULT_MODELS_DIR
         models = scan_ninfer_models(directory)
         payload = {"models": models}
         if models == [EMPTY_MODEL_PLACEHOLDER]:

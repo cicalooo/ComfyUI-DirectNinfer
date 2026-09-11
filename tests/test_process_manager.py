@@ -3,7 +3,6 @@ from __future__ import annotations
 import socket
 import sys
 import textwrap
-import time
 
 import pytest
 
@@ -156,6 +155,24 @@ def test_validation_requires_kv_capacity_for_context(tmp_path):
         validate_server_config(config)
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "example.com"])
+def test_validation_rejects_non_loopback_hosts(tmp_path, host):
+    artifact = tmp_path / "model.ninfer"
+    artifact.write_bytes(b"test")
+    config = ServerConfig(
+        executable=sys.executable,
+        model_artifact=str(artifact),
+        host=host,
+        spec_backend=None,
+        draft_tokens=None,
+        lm_head_draft=False,
+        validate_flags=False,
+    )
+
+    with pytest.raises(NInferConfigurationError, match="loopback"):
+        validate_server_config(config)
+
+
 def test_health_completion_and_graceful_teardown(tmp_path):
     script = _fake_server(tmp_path)
     artifact = tmp_path / "model.ninfer"
@@ -188,6 +205,59 @@ def test_health_completion_and_graceful_teardown(tmp_path):
         )
     assert report.process_exited
     assert report.descendants_gone is not False
+
+
+def test_ipv6_loopback_base_url(tmp_path, monkeypatch):
+    script = _fake_server(tmp_path)
+    config = ServerConfig(
+        executable=sys.executable,
+        model_artifact=str(script),
+        host="::1",
+        port=8080,
+        spec_backend=None,
+        draft_tokens=None,
+        lm_head_draft=False,
+        validate_flags=False,
+    )
+    monkeypatch.setattr(pm, "validate_server_config", lambda _config: (script, script))
+    monkeypatch.setattr(pm.subprocess, "Popen", lambda *_args, **_kwargs: type(
+        "Process",
+        (),
+        {"pid": 123, "stderr": None},
+    )())
+    monkeypatch.setattr(pm, "_initial_descendant_pids", lambda _pid: set())
+    monkeypatch.setattr(pm.threading.Thread, "start", lambda _self: None)
+
+    handle = start_server(config)
+
+    assert handle.base_url == "http://[::1]:8080"
+
+
+def test_zero_port_selects_available_loopback_port(tmp_path):
+    script = _fake_server(tmp_path)
+    config = ServerConfig(
+        executable=sys.executable,
+        model_artifact=str(script),
+        port=0,
+        spec_backend=None,
+        draft_tokens=None,
+        lm_head_draft=False,
+        validate_flags=False,
+    )
+    handle = start_server(config)
+    try:
+        assert handle.config.port > 0
+        assert handle.base_url.endswith(f":{handle.config.port}")
+        wait_until_ready(handle, 5.0, poll_interval=0.05)
+    finally:
+        stop_server(
+            handle,
+            LifecycleTimeouts(
+                graceful_shutdown_s=2.0,
+                force_kill_s=2.0,
+                vram_reclaim_s=0.2,
+            ),
+        )
 
 
 def test_force_kill_fallback(tmp_path):

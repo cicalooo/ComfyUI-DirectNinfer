@@ -9,7 +9,7 @@ import nodes.ninfer_qwen_node as node_module
 from nodes.ninfer_advanced_node import AmpNInferAdvancedNode, merge_advanced
 from nodes.ninfer_qwen_node import NInferQwenNode, deterministic_input_hash
 import ninfer.models as models_module
-from ninfer.models import DEFAULT_MODELS_DIR, derive_model_id, resolve_model_artifact, scan_ninfer_models
+from ninfer.models import derive_model_id, resolve_model_artifact, scan_ninfer_models
 
 
 def _kwargs(tmp_path, **overrides):
@@ -256,11 +256,6 @@ def test_scan_and_resolve_model_artifact(tmp_path):
     assert derive_model_id("Qwen3.8-27B-Uncensored.ninfer") == "Qwen3.8-27B-Uncensored"
 
 
-def test_default_models_directory_discovers_local_artifacts():
-    assert DEFAULT_MODELS_DIR.endswith("artifacts")
-    assert "Qwen3.8-27B-Uncensored.ninfer" in scan_ninfer_models(DEFAULT_MODELS_DIR)
-
-
 def test_legacy_windows_models_dir_falls_back_to_default(tmp_path, monkeypatch):
     fallback_dir = tmp_path / "artifacts"
     fallback_dir.mkdir()
@@ -270,3 +265,21 @@ def test_legacy_windows_models_dir_falls_back_to_default(tmp_path, monkeypatch):
     resolved = resolve_model_artifact(r"C:\models", "model.ninfer")
 
     assert resolved == str(fallback_dir / "model.ninfer")
+
+
+def test_model_artifact_must_stay_inside_models_dir(tmp_path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    outside = tmp_path / "outside.ninfer"
+    outside.write_bytes(b"fake")
+
+    with pytest.raises(ValueError, match="inside models_dir"):
+        resolve_model_artifact(str(models_dir), "../outside.ninfer")
+
+
+def test_model_artifact_requires_ninfer_extension(tmp_path):
+    artifact = tmp_path / "model.gguf"
+    artifact.write_bytes(b"fake")
+
+    with pytest.raises(ValueError, match=r"\.ninfer file"):
+        resolve_model_artifact(str(tmp_path), artifact.name)

@@ -17,6 +17,9 @@ try:  # Package import when ComfyUI loads this directory as a custom node.
     from ..ninfer.models import (
         DEFAULT_MODELS_DIR,
         derive_model_id,
+        native_model_names,
+        native_model_path,
+        register_model_folder,
         resolve_model_artifact,
         scan_ninfer_models,
     )
@@ -38,6 +41,9 @@ except ImportError:  # Direct test/import from the repository root.
     from ninfer.models import (
         DEFAULT_MODELS_DIR,
         derive_model_id,
+        native_model_names,
+        native_model_path,
+        register_model_folder,
         resolve_model_artifact,
         scan_ninfer_models,
     )
@@ -80,6 +86,8 @@ _CACHE_IGNORED_INPUTS = frozenset(
 )
 _FIXED_SEED_RESPONSE_CACHE: OrderedDict[str, str] = OrderedDict()
 _FIXED_SEED_RESPONSE_CACHE_LIMIT = 32
+
+register_model_folder()
 
 
 def _default_ninfer_executable() -> str:
@@ -228,7 +236,7 @@ class NInferQwenNode:
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
-        model_list = scan_ninfer_models(DEFAULT_MODELS_DIR)
+        model_list = native_model_names() or scan_ninfer_models(DEFAULT_MODELS_DIR)
         optional: dict[str, Any] = {
             "advanced": ("AMP_NINFER_ADV",),
             "no_cuda_graph": (
@@ -440,6 +448,15 @@ class NInferQwenNode:
         for error in errors:
             LOGGER.warning("NInfer %s cleanup warning: %s", label, error)
 
+    @staticmethod
+    def _processing_interrupted() -> bool:
+        try:
+            import comfy.model_management as model_management  # type: ignore
+        except ImportError:
+            return False
+        checker = getattr(model_management, "processing_interrupted", None)
+        return bool(checker()) if callable(checker) else False
+
     def enhance_prompt(
         self,
         system_prompt: str,
@@ -514,7 +531,9 @@ class NInferQwenNode:
                 )
             )
 
-        artifact_path = resolve_model_artifact(models_dir, model_artifact)
+        artifact_path = native_model_path(str(model_artifact))
+        if artifact_path is None:
+            artifact_path = resolve_model_artifact(models_dir, model_artifact)
         derived_model_id = derive_model_id(artifact_path)
         cache_key = _generation_cache_key(
             {
@@ -533,7 +552,7 @@ class NInferQwenNode:
                 "unload_comfyui_before_launch": unload_comfyui_before_launch,
                 "unload_after_request": unload_after_request,
                 "no_cuda_graph": no_cuda_graph,
-                "images": images,
+                "image_urls": image_urls,
                 **{key: settings[key] for key in ADVANCED_CACHE_KEYS},
             }
         )
@@ -586,7 +605,9 @@ class NInferQwenNode:
                     seed=int(seed),
                     timeout_s=timeouts.request_s,
                 )
-                response = complete(handle, request)
+                response = complete(
+                    handle, request, cancel_check=self._processing_interrupted
+                )
                 result = response.content
             except BaseException as exc:
                 primary_error = exc

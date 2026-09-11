@@ -9,13 +9,15 @@ place so failures and interruptions use the same teardown path.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import ipaddress
 import logging
 import os
 from pathlib import Path
 import re
 import shlex
 import shutil
+import socket
 import signal
 import subprocess
 import threading
@@ -26,6 +28,7 @@ from .client import (
     ChatRequest,
     ChatResponse,
     NInferClient,
+    NInferCancelledError,
     NInferClientError,
     NInferHTTPError,
     NInferTimeoutError,
@@ -83,7 +86,8 @@ class ServerConfig:
     executable: str = "ninfer-serve.exe" if os.name == "nt" else "ninfer-serve"
     model_artifact: str = ""
     host: str = "127.0.0.1"
-    port: int = 8080
+    # 0 asks the process manager to choose an available loopback port.
+    port: int = 0
     model_id: str = "qwen3.8-27b"
     device: int = 0
     max_context: int = 4096
@@ -339,8 +343,19 @@ def validate_server_config(config: ServerConfig) -> tuple[Path, Path]:
     artifact = _resolve_artifact(config.model_artifact)
     if not config.host.strip():
         raise NInferConfigurationError("host must not be empty")
-    if not 1 <= config.port <= 65535:
-        raise NInferConfigurationError("port must be between 1 and 65535")
+    host = config.host.strip().lower()
+    if host != "localhost":
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                raise NInferConfigurationError(
+                    "host must be a loopback address; NInfer is launched without remote exposure"
+                )
+        except ValueError as exc:
+            raise NInferConfigurationError(
+                "host must be localhost or a loopback IP address"
+            ) from exc
+    if not 0 <= config.port <= 65535:
+        raise NInferConfigurationError("port must be 0 (automatic) or between 1 and 65535")
     if not config.model_id.strip():
         raise NInferConfigurationError("model_id must not be empty")
     for name, value in (
@@ -454,7 +469,21 @@ def start_server(
     """Validate and launch one isolated NInfer process group."""
 
     executable, artifact = validate_server_config(config)
-    command = build_command(config, executable=executable)
+    family = socket.AF_INET6 if ":" in config.host else socket.AF_INET
+    probe = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((config.host, config.port))
+        selected_port = int(probe.getsockname()[1])
+    except OSError as exc:
+        raise NInferConfigurationError(
+            f"NInfer port {config.host}:{config.port} is unavailable; "
+            "choose another port or stop the process using it"
+        ) from exc
+    finally:
+        probe.close()
+    effective_config = replace(config, port=selected_port)
+    command = build_command(effective_config, executable=executable)
     command[1] = str(artifact)
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
@@ -486,12 +515,18 @@ def start_server(
         daemon=True,
     )
     thread.start()
+    url_host = effective_config.host
+    try:
+        if ipaddress.ip_address(url_host).version == 6:
+            url_host = f"[{url_host}]"
+    except ValueError:
+        pass
     return ServerHandle(
         process=process,
-        config=config,
+        config=effective_config,
         executable=executable,
         artifact=artifact,
-        base_url=f"http://{config.host}:{config.port}",
+        base_url=f"http://{url_host}:{effective_config.port}",
         started_at=time.monotonic(),
         baseline_vram=baseline_vram,
         stderr_tail=stderr_tail,
@@ -522,12 +557,16 @@ def wait_until_ready(
                 + suffix
             )
         try:
-            result = client.request("GET", "/health", timeout_s=min(2.0, timeout))
+            remaining = max(0.01, deadline - time.monotonic())
+            result = client.request("GET", "/health", timeout_s=min(2.0, remaining))
             if 200 <= result.status < 300:
                 if handle.config.verify_model_id:
                     try:
                         models = client.get_json(
-                            "/v1/models", timeout_s=min(2.0, timeout)
+                            "/v1/models",
+                            timeout_s=min(
+                                2.0, max(0.01, deadline - time.monotonic())
+                            ),
                         )
                         entries = models.get("data")
                         model_ids = {
@@ -585,7 +624,12 @@ def _vision_reset_hint(request: ChatRequest, stderr_tail: str, exit_code: int | 
     )
 
 
-def complete(handle: ServerHandle, request: ChatRequest) -> ChatResponse:
+def complete(
+    handle: ServerHandle,
+    request: ChatRequest,
+    *,
+    cancel_check: Any | None = None,
+) -> ChatResponse:
     """Send one request through the managed server."""
 
     client = NInferClient(handle.base_url, api_key=handle.config.api_key)
@@ -595,7 +639,9 @@ def complete(handle: ServerHandle, request: ChatRequest) -> ChatResponse:
             # No client-side multi-retry: if ninfer dies mid-request the next
             # attempt becomes WinError 10061. We only retry when the process
             # is still alive after a reset.
-            return client.complete(request, retries=0)
+            return client.complete(request, retries=0, cancel_check=cancel_check)
+        except NInferCancelledError:
+            raise
         except NInferTimeoutError:
             raise
         except NInferHTTPError:

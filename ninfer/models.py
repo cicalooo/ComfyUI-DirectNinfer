@@ -20,6 +20,51 @@ _MODEL_ID_ALIASES = {
 }
 
 
+def _comfy_folder_paths():
+    try:
+        import folder_paths  # type: ignore
+    except ImportError:
+        return None
+    return folder_paths
+
+
+def register_model_folder() -> None:
+    """Register NInfer artifacts with ComfyUI's native model registry."""
+    folder_paths = _comfy_folder_paths()
+    add_path = getattr(folder_paths, "add_model_folder_path", None) if folder_paths else None
+    if callable(add_path):
+        add_path("ninfer", str(_BUNDLED_MODELS_DIR), is_default=True)
+
+
+def native_model_names() -> list[str] | None:
+    """Use ComfyUI's registry when available; return None in unit-test mode."""
+    folder_paths = _comfy_folder_paths()
+    get_names = getattr(folder_paths, "get_filename_list", None) if folder_paths else None
+    if not callable(get_names):
+        return None
+    try:
+        names = [str(name) for name in get_names("ninfer") if str(name).lower().endswith(".ninfer")]
+    except (KeyError, OSError, RuntimeError):
+        return None
+    return sorted(names, key=str.lower) or [EMPTY_MODEL_PLACEHOLDER]
+
+
+def native_model_path(model_artifact: str) -> str | None:
+    """Resolve a registry selection through ComfyUI's path containment logic."""
+    folder_paths = _comfy_folder_paths()
+    get_path = getattr(folder_paths, "get_full_path", None) if folder_paths else None
+    if not callable(get_path):
+        return None
+    try:
+        path = get_path("ninfer", model_artifact)
+    except (KeyError, OSError, RuntimeError):
+        return None
+    if not path:
+        return None
+    resolved = Path(path).resolve()
+    return str(resolved) if resolved.suffix.lower() == ".ninfer" and resolved.is_file() else None
+
+
 def scan_ninfer_models(directory: str) -> list[str]:
     """Return relative paths of ``*.ninfer`` files under ``directory``."""
 
@@ -27,9 +72,12 @@ def scan_ninfer_models(directory: str) -> list[str]:
     if not directory or not root.is_dir():
         return [EMPTY_MODEL_PLACEHOLDER]
     found: list[str] = []
-    for path in root.rglob("*.ninfer"):
-        if path.is_file():
-            found.append(path.relative_to(root).as_posix())
+    try:
+        for path in root.rglob("*.ninfer"):
+            if path.is_file():
+                found.append(path.relative_to(root).as_posix())
+    except OSError:
+        return [EMPTY_MODEL_PLACEHOLDER]
     if not found:
         return [EMPTY_MODEL_PLACEHOLDER]
     found.sort(key=str.lower)
@@ -59,14 +107,26 @@ def resolve_model_artifact(models_dir: str, model_artifact: str) -> str:
         raise NInferConfigurationError(
             "No .ninfer artifact selected. Set models_dir and click Refresh."
         )
-    path = Path(selected).expanduser()
-    if path.is_absolute():
-        return str(path)
-    root = Path(models_dir).expanduser()
-    candidate = root / selected
-    if candidate.is_file():
-        return str(candidate)
-    fallback = Path(DEFAULT_MODELS_DIR) / selected
-    if fallback.is_file():
-        return str(fallback)
+    root = Path(models_dir).expanduser().resolve()
+    selected_path = Path(selected).expanduser()
+    candidate = selected_path if selected_path.is_absolute() else root / selected_path
+    candidate = candidate.resolve()
+
+    if not candidate.is_file() and not selected_path.is_absolute():
+        fallback_root = Path(DEFAULT_MODELS_DIR).expanduser().resolve()
+        fallback = (fallback_root / selected_path).resolve()
+        if fallback.is_file():
+            root = fallback_root
+            candidate = fallback
+
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise NInferConfigurationError(
+            "model_artifact must resolve inside models_dir"
+        ) from exc
+    if candidate.suffix.lower() != ".ninfer":
+        raise NInferConfigurationError("model_artifact must be a .ninfer file")
+    if not candidate.is_file():
+        raise NInferConfigurationError(f"NInfer model artifact was not found: {candidate}")
     return str(candidate)

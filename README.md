@@ -25,9 +25,19 @@ The node does not bundle a runtime or model. Install a NInfer build for the GPU 
 | Windows | `C:\ninfer\ninfer-serve.exe` |
 | Linux | `/opt/ninfer-3090/current/ninfer-serve` |
 
-Add **DirectNinfer** to a workflow and set `ninfer_executable` to the absolute executable path, `models_dir` to the directory containing `.ninfer` files, and `model_artifact` to a selected model. Click **Refresh** after changing the directory.
+Add **DirectNinfer** to a workflow and set `ninfer_executable` to the absolute executable path. In ComfyUI versions with the native model registry, `.ninfer` files are exposed through the `ninfer` model category; older workflows may continue to use `models_dir` and the Refresh button.
 
 The executable can also be supplied through `NINFER_EXECUTABLE`. If it is not set, Windows uses `ninfer-serve.exe`; Linux uses `ninfer-serve` (or the tested `/opt/ninfer-3090/current/ninfer-serve` when present). The model ID is read from the server's `/v1/models` response.
+
+The managed server is restricted to a loopback address and uses an automatic
+free port by default, so repeated or concurrent node executions do not collide.
+The client ignores
+environment proxy settings, so prompts and image data stay on the machine.
+Selected artifacts are resolved through ComfyUI's model registry when available and are always checked for `.ninfer` extension and directory containment.
+
+Cancelling a running ComfyUI queue interrupts the HTTP request and tears down the
+short-lived NInfer process. The request worker is daemonized so a broken server
+cannot hold ComfyUI open during shutdown.
 
 ## Nodes
 

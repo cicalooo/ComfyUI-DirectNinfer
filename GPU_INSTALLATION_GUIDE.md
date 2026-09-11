@@ -206,7 +206,7 @@ folders:
 | `ninfer_executable` | `C:\ninfer\runtime\ninfer-serve.exe` | `/opt/ninfer/build/apps/ninfer-serve` |
 | `models_dir` | `C:\models` | `/opt/ninfer/models` |
 | `model_artifact` | `qwen3_8_27b.ninfer` (dropdown) | `qwen3_8_27b.ninfer` (dropdown) |
-| `device` | `0` (Amp NInfer Advanced) | `0` (Amp NInfer Advanced) |
+| `device` | `0` (DirectNinfer Advanced) | `0` (DirectNinfer Advanced) |
 
 Use `nvidia-smi -L` to identify the GPU index. This node launches one NInfer
 process on one CUDA device; it does not combine VRAM across multiple GPUs.
@@ -228,7 +228,8 @@ together, keep `vision` disabled, set `speculative_backend` to `off`, and
 close other CUDA applications. Re-enable features one at a time.
 
 **The server starts but the node cannot connect** — confirm that the node and
-server use the same `host`/`port`, that the port is free, and that the
+server use the same `host`/`port` when a fixed port is configured. The default
+port `0` selects a free loopback port automatically, and that the
 executable can run with `--help` from the same user account as ComfyUI.
 
 **`WinError 10054` / `10061` after `listening on http://127.0.0.1:8080`**
@@ -241,7 +242,7 @@ send one frame, reduce `context_size`/`kv_capacity` together, and keep
 `unload_comfyui_before_launch` enabled. Confirm text-only works before vision.
 
 **The model is rejected** — verify the SHA-256 and select the exact
-`.ninfer` artifact. Amp NInfer uses the id advertised on `/v1/models`.
+`.ninfer` artifact. DirectNinfer uses the id advertised on `/v1/models`.
 
 ## References
 

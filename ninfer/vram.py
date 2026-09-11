@@ -112,9 +112,10 @@ def unload_comfyui_models() -> tuple[str, ...]:
     except ImportError:
         return ()
     errors: list[str] = []
-    # Names differ slightly between ComfyUI revisions.  Call only functions
-    # that exist and keep the node usable when an older revision lacks one.
-    for name in ("unload_all_models", "cleanup_models", "soft_empty_cache"):
+    # unload_all_models owns removal from ComfyUI's loaded-model registry.
+    # cleanup_models is an internal weakref callback and is unsafe to invoke as
+    # a second, independent unloading pass.
+    for name in ("unload_all_models", "soft_empty_cache"):
         function = getattr(model_management, name, None)
         if not callable(function):
             continue
@@ -185,7 +186,8 @@ def wait_for_vram_reclaim(
     if timeout_s <= 0:
         raise ValueError("timeout_s must be positive")
     if baseline.used_bytes is None and baseline.free_bytes is None:
-        return VramWaitResult(reclaimed=None, snapshot=snapshot_vram(device or baseline.device))
+        target_device = baseline.device if device is None else device
+        return VramWaitResult(reclaimed=None, snapshot=snapshot_vram(target_device))
     target_device = baseline.device if device is None else device
     deadline = time.monotonic() + timeout_s
     latest = snapshot_vram(target_device)

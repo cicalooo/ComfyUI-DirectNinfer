@@ -11,6 +11,9 @@ artifacts/*.ninfer
 
 .venv/
 venv/
+build/
+dist/
+*.egg-info/
 .vscode/
 *.log
 .DS_Store

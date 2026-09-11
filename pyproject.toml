@@ -1,9 +1,14 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "comfyui-directninfer"
 description = "ComfyUI custom nodes for local NInfer prompt generation on Windows and Linux."
 version = "0.1.0"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "Pillow>=9.5",
@@ -19,6 +24,20 @@ PublisherId = "cicalooo"
 DisplayName = "DirectNinfer"
 Icon = ""
 web = "web"
+
+[tool.setuptools]
+packages = [
+    "comfyui_directninfer",
+    "comfyui_directninfer.artifacts",
+    "comfyui_directninfer.ninfer",
+    "comfyui_directninfer.nodes",
+    "comfyui_directninfer.web",
+]
+package-dir = { comfyui_directninfer = "." }
+include-package-data = true
+
+[tool.setuptools.package-data]
+comfyui_directninfer = ["web/*.js", "artifacts/README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

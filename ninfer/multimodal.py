@@ -255,9 +255,7 @@ def _encode_one(
     # compatibility but JPEG is rewritten because ninfer-serve can heap-corrupt
     # while swscaling JPEG frames (Windows exit 3221226356 / 0xC0000374).
     requested = output_format.lower().lstrip(".")
-    if requested in {"jpg", "jpeg", "png", "auto", ""}:
-        normalized_format = SAFE_VISION_WIRE_FORMAT
-    else:
+    if requested not in {"jpg", "jpeg", "png", "auto", ""}:
         raise MultimodalInputError("output_format must be png, jpeg, or auto")
     _ = jpeg_quality  # retained for API compatibility; unused for PNG wire format
     mime = "image/png"
