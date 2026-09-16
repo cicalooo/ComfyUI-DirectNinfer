@@ -14,9 +14,12 @@ from ninfer.process_manager import (
     ServerConfig,
     build_command,
     complete,
+    is_runtime_capacity_failure,
     parse_launch_flags,
+    parse_runtime_capacity_error,
     start_server,
     stop_server,
+    suggest_reduced_max_context,
     validate_server_config,
     wait_until_ready,
 )
@@ -344,3 +347,29 @@ def test_force_kill_fallback(tmp_path):
         if handle.process.poll() is None:
             handle.process.kill()
             handle.process.wait(timeout=2)
+
+
+def test_parse_runtime_capacity_error_and_suggest_reduced_context():
+    message = (
+        "requested Engine runtime reservation requires 8589934592 bytes, "
+        "but only 2147483648 bytes are available for runtime capacity"
+    )
+    parsed = parse_runtime_capacity_error(message)
+    assert parsed == (8589934592, 2147483648)
+    assert is_runtime_capacity_failure(message)
+    assert not is_runtime_capacity_failure("unrelated startup failure")
+
+    reduced = suggest_reduced_max_context(
+        16384,
+        requested_bytes=8589934592,
+        available_bytes=2147483648,
+    )
+    assert reduced is not None
+    assert reduced < 16384
+    assert reduced % 1024 == 0
+    assert reduced >= 1024
+
+    halved = suggest_reduced_max_context(4096)
+    assert halved == 2048
+    assert suggest_reduced_max_context(1024) is None
+    assert suggest_reduced_max_context(1536) == 1024

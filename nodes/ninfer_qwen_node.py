@@ -9,6 +9,7 @@ import logging
 import os
 from pathlib import Path
 import threading
+import time
 from typing import Any
 import uuid
 
@@ -27,11 +28,16 @@ try:  # Package import when ComfyUI loads this directory as a custom node.
     from ..ninfer.process_manager import (
         LifecycleTimeouts,
         NInferConfigurationError,
+        NInferStartupError,
         ServerConfig,
         complete,
+        fit_kv_capacity,
+        is_runtime_capacity_failure,
         parse_launch_flags,
+        parse_runtime_capacity_error,
         start_server,
         stop_server,
+        suggest_reduced_max_context,
         wait_until_ready,
     )
     from ..ninfer.vram import release_comfyui_memory, snapshot_vram
@@ -51,11 +57,16 @@ except ImportError:  # Direct test/import from the repository root.
     from ninfer.process_manager import (
         LifecycleTimeouts,
         NInferConfigurationError,
+        NInferStartupError,
         ServerConfig,
         complete,
+        fit_kv_capacity,
+        is_runtime_capacity_failure,
         parse_launch_flags,
+        parse_runtime_capacity_error,
         start_server,
         stop_server,
+        suggest_reduced_max_context,
         wait_until_ready,
     )
     from ninfer.vram import release_comfyui_memory, snapshot_vram
@@ -64,6 +75,11 @@ except ImportError:  # Direct test/import from the repository root.
 
 LOGGER = logging.getLogger(__name__)
 _NINFER_PROCESS_LOCK = threading.RLock()
+# After heavy ComfyUI models leave residual VRAM, ninfer-serve can load weights
+# then fail Engine runtime reservation. Retry with a smaller max_context.
+_MAX_STARTUP_CAPACITY_RETRIES = 5
+_MIN_CONTEXT_ON_CAPACITY_RETRY = 1024
+_PRELAUNCH_VRAM_SETTLE_S = 0.4
 MAX_IMAGE_INPUTS = 20
 DEFAULT_SYSTEM_PROMPT = (
     "You improve image-generation prompts. Keep the user's intent, add concrete "
@@ -472,6 +488,37 @@ class NInferQwenNode:
         for error in errors:
             LOGGER.warning("NInfer %s cleanup warning: %s", label, error)
 
+    @classmethod
+    def _prepare_gpu_for_launch(cls, label: str, device: int) -> None:
+        """Unload ComfyUI models and give the driver a beat to free VRAM.
+
+        Heavy diffusion/video runs often leave resident models that a single
+        unload pass does not fully release before ninfer-serve starts.
+        """
+
+        cls._cleanup(label)
+        time.sleep(_PRELAUNCH_VRAM_SETTLE_S)
+        cls._cleanup(f"{label} (second pass)")
+        snapshot = snapshot_vram(int(device))
+        free_bytes = getattr(snapshot, "free_bytes", None) if snapshot is not None else None
+        if free_bytes is not None:
+            LOGGER.info(
+                "NInfer pre-launch VRAM free≈%.0f MiB (source=%s)",
+                free_bytes / (1024 * 1024),
+                getattr(snapshot, "source", "unknown"),
+            )
+
+    @staticmethod
+    def _safe_stop_handle(handle: Any, timeouts: LifecycleTimeouts) -> None:
+        if handle is None:
+            return
+        try:
+            stop_server(handle, timeouts)
+        except BaseException as teardown_error:
+            LOGGER.warning(
+                "NInfer stop during capacity retry failed: %s", teardown_error
+            )
+
     @staticmethod
     def _processing_interrupted() -> bool:
         try:
@@ -581,22 +628,29 @@ class NInferQwenNode:
             }
         )
         spec = None if settings["speculative_backend"] == "off" else settings["speculative_backend"]
-        config = ServerConfig(
-            executable=ninfer_executable,
-            model_artifact=artifact_path,
-            host=str(settings["host"]),
-            port=int(settings["port"]),
-            model_id=derived_model_id,
-            device=int(settings["device"]),
-            max_context=int(context_size),
-            kv_capacity=int(kv_capacity),
-            spec_backend=spec,
-            draft_tokens=int(settings["draft_tokens"]) if spec else None,
-            lm_head_draft=bool(settings["lm_head_draft"]) if spec else False,
-            vision=bool(vision),
-            no_cuda_graph=bool(no_cuda_graph),
-            extra_flags=parse_launch_flags(str(settings["server_launch_flags"])),
-        )
+        launch_max_context = int(context_size)
+        launch_kv_capacity = int(kv_capacity)
+        extra_flags = parse_launch_flags(str(settings["server_launch_flags"]))
+        device = int(settings["device"])
+
+        def _make_config(max_context: int, kv_tokens: int) -> ServerConfig:
+            fitted_kv = fit_kv_capacity(max_context, kv_tokens, 1)
+            return ServerConfig(
+                executable=ninfer_executable,
+                model_artifact=artifact_path,
+                host=str(settings["host"]),
+                port=int(settings["port"]),
+                model_id=derived_model_id,
+                device=device,
+                max_context=max_context,
+                kv_capacity=fitted_kv,
+                spec_backend=spec,
+                draft_tokens=int(settings["draft_tokens"]) if spec else None,
+                lm_head_draft=bool(settings["lm_head_draft"]) if spec else False,
+                vision=bool(vision),
+                no_cuda_graph=bool(no_cuda_graph),
+                extra_flags=extra_flags,
+            )
 
         result: str | None = None
         primary_error: BaseException | None = None
@@ -609,10 +663,65 @@ class NInferQwenNode:
                     return (cached_result,)
             try:
                 if unload_comfyui_before_launch:
-                    self._cleanup("before launch")
-                baseline = snapshot_vram(int(settings["device"]))
-                handle = start_server(config, baseline_vram=baseline)
-                wait_until_ready(handle, timeouts.startup_s)
+                    self._prepare_gpu_for_launch("before launch", device)
+                baseline = snapshot_vram(device)
+                last_startup_error: BaseException | None = None
+                for attempt in range(_MAX_STARTUP_CAPACITY_RETRIES):
+                    config = _make_config(launch_max_context, launch_kv_capacity)
+                    try:
+                        handle = start_server(config, baseline_vram=baseline)
+                        wait_until_ready(handle, timeouts.startup_s)
+                        last_startup_error = None
+                        break
+                    except NInferStartupError as exc:
+                        last_startup_error = exc
+                        diagnostic = ""
+                        if handle is not None:
+                            diagnostic = handle.diagnostic_tail()
+                            self._safe_stop_handle(handle, timeouts)
+                            handle = None
+                        combined = f"{exc}\n{diagnostic}"
+                        if (
+                            attempt >= _MAX_STARTUP_CAPACITY_RETRIES - 1
+                            or not is_runtime_capacity_failure(combined)
+                        ):
+                            raise
+                        requested_available = parse_runtime_capacity_error(combined)
+                        requested_b = (
+                            requested_available[0] if requested_available else None
+                        )
+                        available_b = (
+                            requested_available[1] if requested_available else None
+                        )
+                        reduced = suggest_reduced_max_context(
+                            launch_max_context,
+                            requested_bytes=requested_b,
+                            available_bytes=available_b,
+                            min_context=_MIN_CONTEXT_ON_CAPACITY_RETRY,
+                        )
+                        if reduced is None:
+                            raise
+                        LOGGER.warning(
+                            "NInfer Engine runtime capacity shortfall "
+                            "(requested=%s available=%s); retrying with "
+                            "max_context %s → %s (attempt %s/%s)",
+                            requested_b,
+                            available_b,
+                            launch_max_context,
+                            reduced,
+                            attempt + 2,
+                            _MAX_STARTUP_CAPACITY_RETRIES,
+                        )
+                        launch_max_context = reduced
+                        launch_kv_capacity = min(launch_kv_capacity, reduced)
+                        if unload_comfyui_before_launch:
+                            self._prepare_gpu_for_launch(
+                                "before capacity retry", device
+                            )
+                            baseline = snapshot_vram(device)
+                if last_startup_error is not None:
+                    raise last_startup_error
+                assert handle is not None
                 model_id = handle.advertised_model_id or derived_model_id
                 request: ChatRequest = build_chat_request(
                     model_id=model_id,

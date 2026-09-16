@@ -312,3 +312,148 @@ def test_validate_inputs_method(tmp_path):
     assert isinstance(err_missing, str)
     assert "could not be resolved" in err_missing
 
+
+def test_enhance_prompt_retries_with_reduced_context_on_capacity_error(tmp_path, monkeypatch):
+    """After heavy GPU work, ninfer may fail Engine runtime reservation; retry smaller."""
+
+    node = NInferQwenNode()
+    starts: list[int] = []
+    stops: list[str] = []
+
+    monkeypatch.setattr(node_module, "release_comfyui_memory", lambda: ())
+    monkeypatch.setattr(node_module, "snapshot_vram", lambda _device: None)
+    monkeypatch.setattr(node_module.time, "sleep", lambda _s: None)
+
+    def fake_start(config, baseline_vram=None):
+        starts.append(int(config.max_context))
+        handle = SimpleNamespace(
+            advertised_model_id="qwen3.8-27b",
+            config=config,
+            diagnostic_tail=lambda: (
+                "requested Engine runtime reservation requires 8000000000 bytes, "
+                "but only 2000000000 bytes are available for runtime capacity"
+                if len(starts) == 1
+                else ""
+            ),
+        )
+        return handle
+
+    def fake_ready(handle, timeout, poll_interval=0.25):
+        if len(starts) == 1:
+            from ninfer.process_manager import NInferStartupError
+
+            raise NInferStartupError(
+                "NInfer exited before /health became ready (code=1); stderr="
+                + handle.diagnostic_tail()
+            )
+
+    monkeypatch.setattr(node_module, "start_server", fake_start)
+    monkeypatch.setattr(node_module, "wait_until_ready", fake_ready)
+    monkeypatch.setattr(
+        node_module,
+        "complete",
+        lambda *args, **kwargs: SimpleNamespace(content="ok after retry"),
+    )
+
+    def fake_stop(handle, timeouts):
+        stops.append("stop")
+        return SimpleNamespace(vram_reclaimed=True, notes=())
+
+    monkeypatch.setattr(node_module, "stop_server", fake_stop)
+
+    out = node.enhance_prompt(**_kwargs(tmp_path, context_size=16384, kv_capacity=16384))
+    assert out == ("ok after retry",)
+    assert len(starts) == 2
+    assert starts[0] == 16384
+    assert starts[1] < starts[0]
+    assert starts[1] % 1024 == 0
+    assert "stop" in stops
+
+
+def test_enhance_prompt_does_not_retry_unrelated_startup_errors(tmp_path, monkeypatch):
+    node = NInferQwenNode()
+    starts: list[int] = []
+
+    monkeypatch.setattr(node_module, "release_comfyui_memory", lambda: ())
+    monkeypatch.setattr(node_module, "snapshot_vram", lambda _device: None)
+    monkeypatch.setattr(node_module.time, "sleep", lambda _s: None)
+
+    def fake_start(config, baseline_vram=None):
+        starts.append(int(config.max_context))
+        return SimpleNamespace(
+            advertised_model_id="qwen3.8-27b",
+            diagnostic_tail=lambda: "some other fatal init error",
+        )
+
+    def fake_ready(handle, timeout, poll_interval=0.25):
+        from ninfer.process_manager import NInferStartupError
+
+        raise NInferStartupError(
+            "NInfer exited before /health became ready (code=1); stderr="
+            + handle.diagnostic_tail()
+        )
+
+    monkeypatch.setattr(node_module, "start_server", fake_start)
+    monkeypatch.setattr(node_module, "wait_until_ready", fake_ready)
+    monkeypatch.setattr(
+        node_module,
+        "stop_server",
+        lambda *args, **kwargs: SimpleNamespace(vram_reclaimed=True, notes=()),
+    )
+
+    with pytest.raises(Exception, match="other fatal"):
+        node.enhance_prompt(**_kwargs(tmp_path, context_size=8192, kv_capacity=8192))
+    assert starts == [8192]
+
+
+def test_capacity_retry_reaches_1024_for_reported_shortfall(tmp_path, monkeypatch):
+    node = NInferQwenNode()
+    starts: list[int] = []
+    stops: list[int] = []
+    capacity_error = (
+        "requested Engine runtime reservation requires 462276352 bytes, "
+        "but only 306614272 bytes are available for runtime capacity"
+    )
+
+    monkeypatch.setattr(node_module, "release_comfyui_memory", lambda: ())
+    monkeypatch.setattr(node_module, "snapshot_vram", lambda _device: None)
+    monkeypatch.setattr(node_module.time, "sleep", lambda _seconds: None)
+
+    def fake_start(config, baseline_vram=None):
+        starts.append(int(config.max_context))
+        return SimpleNamespace(
+            advertised_model_id="qwen3.8-27b",
+            config=config,
+            diagnostic_tail=lambda: capacity_error,
+        )
+
+    def fake_ready(handle, timeout, poll_interval=0.25):
+        if len(starts) < 5:
+            from ninfer.process_manager import NInferStartupError
+
+            raise NInferStartupError(
+                "NInfer exited before /health became ready (code=1); stderr="
+                + capacity_error
+            )
+
+    def fake_stop(handle, timeouts):
+        stops.append(int(handle.config.max_context))
+        return SimpleNamespace(vram_reclaimed=True, notes=())
+
+    monkeypatch.setattr(node_module, "start_server", fake_start)
+    monkeypatch.setattr(node_module, "wait_until_ready", fake_ready)
+    monkeypatch.setattr(node_module, "stop_server", fake_stop)
+    monkeypatch.setattr(
+        node_module,
+        "complete",
+        lambda *args, **kwargs: SimpleNamespace(content="ok at minimum context"),
+    )
+
+    result = node.enhance_prompt(
+        **_kwargs(tmp_path, context_size=16384, kv_capacity=16384)
+    )
+
+    assert result == ("ok at minimum context",)
+    assert starts == [16384, 9216, 5120, 2048, 1024]
+    assert stops == starts
+

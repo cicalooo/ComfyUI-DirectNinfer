@@ -266,6 +266,77 @@ def fit_kv_capacity(
     return ceiling
 
 
+
+_RUNTIME_CAPACITY_RE = re.compile(
+    r"requested\s+Engine\s+runtime\s+reservation\s+requires\s+(\d+)\s+bytes,"
+    r"\s+but\s+only\s+(\d+)\s+bytes\s+are\s+available\s+for\s+runtime\s+capacity",
+    re.IGNORECASE,
+)
+
+_MIN_CONTEXT_ON_CAPACITY_RETRY = 1024
+
+
+def parse_runtime_capacity_error(text: str | None) -> tuple[int, int] | None:
+    """Parse ninfer-serve runtime-capacity stderr into (requested, available) bytes."""
+
+    if not text:
+        return None
+    match = _RUNTIME_CAPACITY_RE.search(text)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def is_runtime_capacity_failure(text: str | None) -> bool:
+    """True when stderr/message indicates Engine runtime reservation could not fit."""
+
+    if not text:
+        return False
+    if parse_runtime_capacity_error(text) is not None:
+        return True
+    lowered = text.lower()
+    return (
+        "runtime capacity" in lowered
+        and "reservation" in lowered
+        and "available" in lowered
+    )
+
+
+def suggest_reduced_max_context(
+    current_max_context: int,
+    *,
+    requested_bytes: int | None = None,
+    available_bytes: int | None = None,
+    min_context: int = _MIN_CONTEXT_ON_CAPACITY_RETRY,
+    scale: float = 0.5,
+) -> int | None:
+    """Pick a smaller ``max_context`` for the next launch after a capacity failure.
+
+    Prefer a proportional reduction from the bytes in the ninfer error, with a
+    safety margin. Fall back to halving. Always align down to 1024-token steps.
+    Returns ``None`` when the context cannot be reduced further.
+    """
+
+    if current_max_context <= min_context:
+        return None
+    if (
+        requested_bytes is not None
+        and available_bytes is not None
+        and requested_bytes > 0
+        and available_bytes >= 0
+    ):
+        ratio = min(0.9, max(0.1, (available_bytes / requested_bytes) * 0.85))
+        candidate = int(current_max_context * ratio)
+    else:
+        candidate = int(current_max_context * scale)
+    candidate = max(min_context, (candidate // 1024) * 1024)
+    if candidate >= current_max_context:
+        candidate = max(min_context, ((current_max_context - 1024) // 1024) * 1024)
+    if candidate < min_context or candidate >= current_max_context:
+        return None
+    return candidate
+
+
 def build_command(config: ServerConfig, *, executable: str | Path | None = None) -> list[str]:
     """Construct the argument vector passed to NInfer, never through a shell."""
 
@@ -898,10 +969,14 @@ __all__ = [
     "ServerHandle",
     "build_command",
     "complete",
+    "fit_kv_capacity",
+    "is_runtime_capacity_failure",
     "parse_launch_flags",
+    "parse_runtime_capacity_error",
     "probe_supported_flags",
     "start_server",
     "stop_server",
+    "suggest_reduced_max_context",
     "validate_server_config",
     "wait_until_ready",
 ]
