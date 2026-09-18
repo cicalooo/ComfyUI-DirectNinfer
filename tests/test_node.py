@@ -319,10 +319,20 @@ def test_enhance_prompt_retries_with_reduced_context_on_capacity_error(tmp_path,
     node = NInferQwenNode()
     starts: list[int] = []
     stops: list[str] = []
+    releases: list[str] = []
 
-    monkeypatch.setattr(node_module, "release_comfyui_memory", lambda: ())
+    monkeypatch.setattr(
+        node_module,
+        "release_comfyui_memory",
+        lambda: releases.append("release") or (),
+    )
     monkeypatch.setattr(node_module, "snapshot_vram", lambda _device: None)
-    monkeypatch.setattr(node_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        node_module,
+        "_PRELAUNCH_VRAM_SETTLE_S",
+        0.0,
+        raising=False,
+    )
 
     def fake_start(config, baseline_vram=None):
         starts.append(int(config.max_context))
@@ -368,6 +378,7 @@ def test_enhance_prompt_retries_with_reduced_context_on_capacity_error(tmp_path,
     assert starts[1] < starts[0]
     assert starts[1] % 1024 == 0
     assert "stop" in stops
+    assert releases == ["release"]
 
 
 def test_enhance_prompt_does_not_retry_unrelated_startup_errors(tmp_path, monkeypatch):
@@ -376,7 +387,6 @@ def test_enhance_prompt_does_not_retry_unrelated_startup_errors(tmp_path, monkey
 
     monkeypatch.setattr(node_module, "release_comfyui_memory", lambda: ())
     monkeypatch.setattr(node_module, "snapshot_vram", lambda _device: None)
-    monkeypatch.setattr(node_module.time, "sleep", lambda _s: None)
 
     def fake_start(config, baseline_vram=None):
         starts.append(int(config.max_context))
@@ -417,7 +427,6 @@ def test_capacity_retry_reaches_1024_for_reported_shortfall(tmp_path, monkeypatc
 
     monkeypatch.setattr(node_module, "release_comfyui_memory", lambda: ())
     monkeypatch.setattr(node_module, "snapshot_vram", lambda _device: None)
-    monkeypatch.setattr(node_module.time, "sleep", lambda _seconds: None)
 
     def fake_start(config, baseline_vram=None):
         starts.append(int(config.max_context))

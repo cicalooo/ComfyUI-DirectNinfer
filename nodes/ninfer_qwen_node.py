@@ -9,7 +9,6 @@ import logging
 import os
 from pathlib import Path
 import threading
-import time
 from typing import Any
 import uuid
 
@@ -79,7 +78,6 @@ _NINFER_PROCESS_LOCK = threading.RLock()
 # then fail Engine runtime reservation. Retry with a smaller max_context.
 _MAX_STARTUP_CAPACITY_RETRIES = 5
 _MIN_CONTEXT_ON_CAPACITY_RETRY = 1024
-_PRELAUNCH_VRAM_SETTLE_S = 0.4
 MAX_IMAGE_INPUTS = 20
 DEFAULT_SYSTEM_PROMPT = (
     "You improve image-generation prompts. Keep the user's intent, add concrete "
@@ -433,8 +431,11 @@ class NInferQwenNode:
                 "unload_after_request": (
                     "BOOLEAN",
                     {
-                        "default": True,
-                        "tooltip": "Free ComfyUI CUDA memory after NInfer exits.",
+                        "default": False,
+                        "tooltip": (
+                            "Deprecated compatibility input. NInfer process exit releases "
+                            "its own VRAM; DirectNinfer does not unload ComfyUI models afterward."
+                        ),
                     },
                 ),
             },
@@ -490,15 +491,9 @@ class NInferQwenNode:
 
     @classmethod
     def _prepare_gpu_for_launch(cls, label: str, device: int) -> None:
-        """Unload ComfyUI models and give the driver a beat to free VRAM.
-
-        Heavy diffusion/video runs often leave resident models that a single
-        unload pass does not fully release before ninfer-serve starts.
-        """
+        """Ask ComfyUI to unload resident models once before NInfer starts."""
 
         cls._cleanup(label)
-        time.sleep(_PRELAUNCH_VRAM_SETTLE_S)
-        cls._cleanup(f"{label} (second pass)")
         snapshot = snapshot_vram(int(device))
         free_bytes = getattr(snapshot, "free_bytes", None) if snapshot is not None else None
         if free_bytes is not None:
@@ -714,11 +709,6 @@ class NInferQwenNode:
                         )
                         launch_max_context = reduced
                         launch_kv_capacity = min(launch_kv_capacity, reduced)
-                        if unload_comfyui_before_launch:
-                            self._prepare_gpu_for_launch(
-                                "before capacity retry", device
-                            )
-                            baseline = snapshot_vram(device)
                 if last_startup_error is not None:
                     raise last_startup_error
                 assert handle is not None
@@ -760,18 +750,6 @@ class NInferQwenNode:
                             LOGGER.error(
                                 "NInfer teardown also failed after the primary error: %s",
                                 teardown_error,
-                                exc_info=True,
-                            )
-                if unload_after_request:
-                    try:
-                        self._cleanup("after request")
-                    except BaseException as cleanup_error:
-                        if primary_error is None:
-                            primary_error = cleanup_error
-                        else:
-                            LOGGER.error(
-                                "ComfyUI cleanup also failed after the primary error: %s",
-                                cleanup_error,
                                 exc_info=True,
                             )
             if primary_error is not None:
