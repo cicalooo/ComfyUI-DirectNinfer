@@ -378,7 +378,7 @@ def test_enhance_prompt_retries_with_reduced_context_on_capacity_error(tmp_path,
     assert starts[1] < starts[0]
     assert starts[1] % 1024 == 0
     assert "stop" in stops
-    assert releases == ["release"]
+    assert releases == []
 
 
 def test_enhance_prompt_does_not_retry_unrelated_startup_errors(tmp_path, monkeypatch):

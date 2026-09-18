@@ -424,8 +424,11 @@ class NInferQwenNode:
                 "unload_comfyui_before_launch": (
                     "BOOLEAN",
                     {
-                        "default": True,
-                        "tooltip": "Free ComfyUI CUDA memory before starting NInfer.",
+                        "default": False,
+                        "tooltip": (
+                            "Deprecated compatibility input. DirectNinfer does not call "
+                            "ComfyUI model-management cleanup; start from a free-VRAM state."
+                        ),
                     },
                 ),
                 "unload_after_request": (
@@ -657,8 +660,6 @@ class NInferQwenNode:
                     _FIXED_SEED_RESPONSE_CACHE.move_to_end(cache_key)
                     return (cached_result,)
             try:
-                if unload_comfyui_before_launch:
-                    self._prepare_gpu_for_launch("before launch", device)
                 baseline = snapshot_vram(device)
                 last_startup_error: BaseException | None = None
                 for attempt in range(_MAX_STARTUP_CAPACITY_RETRIES):
