@@ -105,25 +105,20 @@ def snapshot_vram(device: int = 0) -> VramSnapshot:
 
 
 def unload_comfyui_models() -> tuple[str, ...]:
-    """Ask ComfyUI's model manager to release resident models if available."""
+    """Ask ComfyUI to unload resident models once, if available."""
 
     try:
         import comfy.model_management as model_management  # type: ignore
     except ImportError:
         return ()
-    errors: list[str] = []
-    # unload_all_models owns removal from ComfyUI's loaded-model registry.
-    # cleanup_models is an internal weakref callback and is unsafe to invoke as
-    # a second, independent unloading pass.
-    for name in ("unload_all_models", "soft_empty_cache"):
-        function = getattr(model_management, name, None)
-        if not callable(function):
-            continue
-        try:
-            function()
-        except Exception as exc:
-            errors.append(f"{name}: {exc}")
-    return tuple(errors)
+    function = getattr(model_management, "unload_all_models", None)
+    if not callable(function):
+        return ()
+    try:
+        function()
+    except Exception as exc:
+        return (f"unload_all_models: {exc}",)
+    return ()
 
 
 def clear_python_cuda_caches() -> tuple[str, ...]:
@@ -156,9 +151,9 @@ def clear_python_cuda_caches() -> tuple[str, ...]:
 
 
 def release_comfyui_memory() -> tuple[str, ...]:
-    """Unload ComfyUI models and clear Python/CUDA caches."""
+    """Perform the single supported ComfyUI pre-launch unload."""
 
-    return unload_comfyui_models() + clear_python_cuda_caches()
+    return unload_comfyui_models()
 
 
 def _is_within_tolerance(

@@ -31,7 +31,7 @@ def test_unknown_vram_snapshot_honors_explicit_device_zero(monkeypatch):
     assert seen == [0]
 
 
-def test_unload_uses_public_model_manager_operations(monkeypatch):
+def test_unload_uses_only_comfyui_unload_all_models(monkeypatch):
     calls: list[str] = []
     model_management = types.ModuleType("comfy.model_management")
     model_management.unload_all_models = lambda: calls.append("unload_all_models")
@@ -43,4 +43,21 @@ def test_unload_uses_public_model_manager_operations(monkeypatch):
     monkeypatch.setitem(sys.modules, "comfy.model_management", model_management)
 
     assert vram.unload_comfyui_models() == ()
-    assert calls == ["unload_all_models", "soft_empty_cache"]
+    assert calls == ["unload_all_models"]
+
+
+def test_release_does_not_run_python_or_cuda_cache_cleanup(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        vram,
+        "unload_comfyui_models",
+        lambda: calls.append("unload") or (),
+    )
+    monkeypatch.setattr(
+        vram,
+        "clear_python_cuda_caches",
+        lambda: calls.append("cache_cleanup") or (),
+    )
+
+    assert vram.release_comfyui_memory() == ()
+    assert calls == ["unload"]
